@@ -41,6 +41,10 @@ async function runStockCheck() {
             });
           }
         }
+
+        // Trigger Daily WhatsApp Low Stock Summary to Business Owner
+        const { sendLowStockAlertToOwner } = require('../services/whatsapp.service');
+        await sendLowStockAlertToOwner(orgDb).catch(err => console.warn(`[WHATSAPP LOW STOCK] ${org.db_name}:`, err.message));
       } catch (orgErr) {
         console.error(`[CRON STOCK ERROR] ${org.db_name}:`, orgErr.message);
       }

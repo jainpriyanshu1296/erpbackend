@@ -3,7 +3,18 @@ const { v4: uuid } = require('uuid');
 const { ok, fail, asyncHandler } = require('../utils/response');
 const { nextNumber } = require('../services/erp.service');
 const { generateSalesXml, generatePurchaseXml, generateMastersXml } = require('../services/tally-export.service');
-const { handleSalesOrderConfirmed, handleWorkOrderCompleted, getAutomationRules, saveAutomationRules } = require('../services/automation.service');
+const { 
+  handleSalesOrderConfirmed, 
+  handleWorkOrderCompleted, 
+  handleQcInspectionResult,
+  handleDeliveryChallanSaved,
+  getAutomationRules, 
+  saveAutomationRules 
+} = require('../services/automation.service');
+const { generateEinvoice, cancelEinvoice } = require('../services/einvoice.service');
+const { generateEwayBill, cancelEwayBill } = require('../services/ewaybill.service');
+const { getWhatsAppSettings, saveWhatsAppSettings, sendPoToVendor, sendInvoiceToCustomer } = require('../services/whatsapp.service');
+const { generateItemQr, generateWorkOrderQr, verifyDispatchScan } = require('../services/qr.service');
 const permission = require('../middleware/permission');
 const activity = require('../middleware/activity');
 
@@ -368,4 +379,194 @@ workflow.put('/settings/automations', permission('settings', 'can_edit'), asyncH
   return ok(res, updated, 'Automation rules updated successfully');
 }));
 
+// QC Inspection Result Process (triggers auto-split and debit note)
+workflow.post('/quality/inspections/:id/process-result', permission('quality', 'can_edit'), asyncHandler(async (req, res) => {
+  const { accepted_qty, rejected_qty } = req.body;
+  if (accepted_qty !== undefined || rejected_qty !== undefined) {
+    await req.orgDb.query(
+      'UPDATE qc_inspections SET accepted_qty = ?, rejected_qty = ? WHERE id = ?',
+      { replacements: [Number(accepted_qty || 0), Number(rejected_qty || 0), req.params.id] }
+    );
+  }
+  const autoResult = await handleQcInspectionResult(req.orgDb, req.params.id, req.user.sub);
+  return ok(res, autoResult, 'QC result processed and stock updated');
+}));
+
+// Delivery Challan Save (triggers auto-invoice drafting)
+workflow.post('/sales/challans/create-and-invoice', permission('sales', 'can_create'), asyncHandler(async (req, res) => {
+  const { customer_id, sales_order_id, vehicle_number, items } = req.body;
+  const challanId = uuid();
+  const challanNumber = await nextNumber(req.orgDb, 'delivery_challan', 'DC-', 5);
+
+  const tx = await req.orgDb.transaction();
+  try {
+    await req.orgDb.query(`
+      INSERT INTO delivery_challans (id, challan_number, customer_id, sales_order_id, challan_date, vehicle_number)
+      VALUES (?, ?, ?, ?, CURDATE(), ?)
+    `, { replacements: [challanId, challanNumber, customer_id, sales_order_id || null, vehicle_number || null], transaction: tx });
+
+    for (const item of (items || [])) {
+      await req.orgDb.query(`
+        INSERT INTO delivery_challan_items (id, challan_id, order_item_id, item_id, quantity, rate)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, { replacements: [uuid(), challanId, item.order_item_id || null, item.item_id, item.quantity, item.rate || 0], transaction: tx });
+    }
+
+    await tx.commit();
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  }
+
+  const invoiceResult = await handleDeliveryChallanSaved(req.orgDb, challanId, req.user.sub);
+  return ok(res, { challan_id: challanId, challan_number: challanNumber, invoice: invoiceResult }, 'Delivery challan created');
+}));
+
+// ─────────────────────────────────────────────────────────────
+// GST E-INVOICE (IRN) ENDPOINTS
+// ─────────────────────────────────────────────────────────────
+workflow.post('/sales/invoices/:id/generate-irn', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
+  const [invs] = await req.orgDb.query('SELECT * FROM invoices WHERE id = ?', { replacements: [req.params.id] });
+  if (!invs.length) return fail(res, 404, 'NOT_FOUND', 'Invoice not found');
+  const invoice = invs[0];
+
+  const [custs] = await req.orgDb.query('SELECT * FROM customers WHERE id = ?', { replacements: [invoice.customer_id] });
+  const buyer = custs[0] || {};
+
+  const [lines] = await req.orgDb.query(`
+    SELECT iil.*, im.item_name, im.hsn_code, im.uom_id, u.uom_code
+    FROM invoice_item_lines iil
+    LEFT JOIN item_master im ON im.id = iil.item_id
+    LEFT JOIN uom_master u ON u.id = im.uom_id
+    WHERE iil.invoice_id = ?
+  `, { replacements: [req.params.id] });
+
+  const seller = {
+    gstin: req.org.gstin || '23AAAAA0000A1Z5',
+    company_name: req.org.company_name,
+    address: req.org.address,
+    city: req.org.city || 'Indore',
+    state: req.org.state || 'Madhya Pradesh'
+  };
+
+  const einvResult = await generateEinvoice({ invoice, seller, buyer, lines });
+
+  await req.orgDb.query(`
+    UPDATE invoices
+    SET irn = ?, signed_qr_code = ?, ack_no = ?, ack_date = ?, einvoice_status = 'generated'
+    WHERE id = ?
+  `, { replacements: [einvResult.irn, einvResult.signed_qr_code, einvResult.ack_no, einvResult.ack_date, req.params.id] });
+
+  return ok(res, einvResult, 'E-Invoice IRN generated successfully');
+}));
+
+workflow.post('/sales/invoices/:id/cancel-irn', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
+  const [invs] = await req.orgDb.query('SELECT irn FROM invoices WHERE id = ?', { replacements: [req.params.id] });
+  if (!invs.length || !invs[0].irn) return fail(res, 400, 'NO_IRN', 'Invoice does not have an active IRN');
+
+  const cancelResult = await cancelEinvoice({ irn: invs[0].irn, reason: req.body.reason, remark: req.body.remark });
+  await req.orgDb.query("UPDATE invoices SET einvoice_status = 'cancelled' WHERE id = ?", { replacements: [req.params.id] });
+
+  return ok(res, cancelResult, 'E-Invoice IRN cancelled successfully');
+}));
+
+// ─────────────────────────────────────────────────────────────
+// GST E-WAY BILL ENDPOINTS
+// ─────────────────────────────────────────────────────────────
+workflow.post('/sales/challans/:id/generate-ewaybill', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
+  const [challans] = await req.orgDb.query('SELECT * FROM delivery_challans WHERE id = ?', { replacements: [req.params.id] });
+  if (!challans.length) return fail(res, 404, 'NOT_FOUND', 'Delivery challan not found');
+  const challan = challans[0];
+
+  const [custs] = await req.orgDb.query('SELECT * FROM customers WHERE id = ?', { replacements: [challan.customer_id] });
+  const buyer = custs[0] || {};
+
+  const [items] = await req.orgDb.query('SELECT * FROM delivery_challan_items WHERE challan_id = ?', { replacements: [req.params.id] });
+
+  const seller = {
+    gstin: req.org.gstin || '23AAAAA0000A1Z5',
+    company_name: req.org.company_name,
+    address: req.org.address
+  };
+
+  const vehicle = req.body.vehicle_number || challan.vehicle_number;
+  const ewbResult = await generateEwayBill({
+    challan,
+    items,
+    seller,
+    buyer,
+    vehicleNumber: vehicle,
+    distanceKm: req.body.distance_km || 150
+  });
+
+  await req.orgDb.query(`
+    UPDATE delivery_challans
+    SET eway_bill_no = ?, eway_bill_date = ?, valid_until = ?, vehicle_number = ?, eway_bill_status = 'generated'
+    WHERE id = ?
+  `, { replacements: [ewbResult.eway_bill_no, ewbResult.eway_bill_date, ewbResult.valid_until, ewbResult.vehicle_number, req.params.id] });
+
+  return ok(res, ewbResult, 'E-Way Bill generated successfully');
+}));
+
+workflow.post('/sales/challans/:id/cancel-ewaybill', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
+  const [ch] = await req.orgDb.query('SELECT eway_bill_no FROM delivery_challans WHERE id = ?', { replacements: [req.params.id] });
+  if (!ch.length || !ch[0].eway_bill_no) return fail(res, 400, 'NO_EWB', 'Challan has no active E-Way Bill');
+
+  const cancelResult = await cancelEwayBill({ ewayBillNo: ch[0].eway_bill_no });
+  await req.orgDb.query("UPDATE delivery_challans SET eway_bill_status = 'cancelled' WHERE id = ?", { replacements: [req.params.id] });
+
+  return ok(res, cancelResult, 'E-Way Bill cancelled successfully');
+}));
+
+// ─────────────────────────────────────────────────────────────
+// WHATSAPP SETTINGS & DIRECT DISPATCH ENDPOINTS
+// ─────────────────────────────────────────────────────────────
+workflow.get('/settings/whatsapp', permission('settings', 'can_view'), asyncHandler(async (req, res) => {
+  return ok(res, await getWhatsAppSettings(req.orgDb));
+}));
+
+workflow.put('/settings/whatsapp', permission('settings', 'can_edit'), asyncHandler(async (req, res) => {
+  const updated = await saveWhatsAppSettings(req.orgDb, req.body);
+  return ok(res, updated, 'WhatsApp settings saved');
+}));
+
+workflow.post('/purchase/orders/:id/send-whatsapp', permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
+  const result = await sendPoToVendor(req.orgDb, req.params.id);
+  return ok(res, result, 'WhatsApp message sent to vendor');
+}));
+
+workflow.post('/sales/invoices/:id/send-whatsapp', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
+  const result = await sendInvoiceToCustomer(req.orgDb, req.params.id);
+  return ok(res, result, 'WhatsApp message sent to customer');
+}));
+
+// ─────────────────────────────────────────────────────────────
+// BARCODE & QR CODE WORKFLOWS
+// ─────────────────────────────────────────────────────────────
+workflow.get('/inventory/items/:id/qr', permission('inventory', 'can_view'), asyncHandler(async (req, res) => {
+  const [items] = await req.orgDb.query('SELECT * FROM item_master WHERE id = ?', { replacements: [req.params.id] });
+  if (!items.length) return fail(res, 404, 'NOT_FOUND', 'Item not found');
+  return ok(res, generateItemQr(items[0]));
+}));
+
+workflow.get('/production/work-orders/:id/qr', permission('production', 'can_view'), asyncHandler(async (req, res) => {
+  const [wos] = await req.orgDb.query('SELECT * FROM work_orders WHERE id = ?', { replacements: [req.params.id] });
+  if (!wos.length) return fail(res, 404, 'NOT_FOUND', 'Work order not found');
+  return ok(res, generateWorkOrderQr(wos[0]));
+}));
+
+workflow.post('/sales/challans/verify-scan', permission('sales', 'can_view'), asyncHandler(async (req, res) => {
+  const { sales_order_id, scanned_code } = req.body;
+  const [items] = await req.orgDb.query(`
+    SELECT soi.item_id, soi.quantity, im.item_name, im.item_code
+    FROM sales_order_items soi
+    JOIN item_master im ON im.id = soi.item_id
+    WHERE soi.order_id = ?
+  `, { replacements: [sales_order_id] });
+
+  const result = verifyDispatchScan({ expectedItems: items, scannedCode: scanned_code });
+  return ok(res, result);
+}));
+
 module.exports = workflow;
+

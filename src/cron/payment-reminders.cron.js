@@ -41,6 +41,10 @@ async function runPaymentCheck() {
             });
           }
         }
+
+        // Trigger WhatsApp Overdue Reminders to Customers
+        const { sendOverdueRemindersBatch } = require('../services/whatsapp.service');
+        await sendOverdueRemindersBatch(orgDb).catch(err => console.warn(`[WHATSAPP REMINDERS] ${org.db_name}:`, err.message));
       } catch (orgErr) {
         console.error(`[CRON PAYMENT ERROR] ${org.db_name}:`, orgErr.message);
       }

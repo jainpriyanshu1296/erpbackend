@@ -13,6 +13,8 @@ const { excel, pdf } = require('./services/export.service');
 const crud = require('./modules/generic');
 const workflowRoutes = require('./modules/workflows');
 const authRoutes = require('./modules/auth/auth.routes');
+const forecastingRoutes = require('./modules/forecasting/forecasting.routes');
+const smartReportsRoutes = require('./modules/reports/smart-reports.routes');
 const masterDb = require('./config/db');
 const { MODULES } = require('./config/constants');
 const { v4: uuid } = require('uuid');
@@ -100,6 +102,8 @@ protectedRouter.get('/reports/:table/export.pdf', asyncHandler(async (req, res) 
 protectedRouter.get('/masters/:type', asyncHandler(async (req, res) => { const map = { items: 'item_master', vendors: 'vendors', customers: 'customers', uom: 'uom_master', hsn: 'hsn_master', departments: 'departments', machines: 'machines', warehouses: 'warehouses' }; const table = map[req.params.type]; if (!table) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Unknown master' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${table} ORDER BY 1 DESC LIMIT 500`); return ok(res, rows); }));
 app.use('/api/v1', protectedRouter);
 app.use('/api/v1', workflowRoutes);
+app.use('/api/v1/forecasting', forecastingRoutes);
+app.use('/api/v1/reports', smartReportsRoutes);
 const adminRouter = express.Router();
 adminRouter.use(auth, requireAdmin);
 adminRouter.get('/dashboard', asyncHandler(async (req, res) => { const [[organizations]] = await masterDb.query('SELECT COUNT(*) total FROM organizations'); return ok(res, { organizations: organizations.total }); }));
