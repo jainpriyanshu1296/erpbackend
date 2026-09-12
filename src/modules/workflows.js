@@ -3,6 +3,7 @@ const { v4: uuid } = require('uuid');
 const { ok, fail, asyncHandler } = require('../utils/response');
 const { nextNumber } = require('../services/erp.service');
 const { generateSalesXml, generatePurchaseXml, generateMastersXml } = require('../services/tally-export.service');
+const { handleSalesOrderConfirmed, handleWorkOrderCompleted, getAutomationRules, saveAutomationRules } = require('../services/automation.service');
 const permission = require('../middleware/permission');
 const activity = require('../middleware/activity');
 
@@ -166,7 +167,9 @@ workflow.post('/sales/orders/from-quotation', permission('sales', 'can_create'),
     for (const item of source) await req.orgDb.query('INSERT INTO sales_order_items(id,order_id,item_id,quantity,rate,quotation_item_id) VALUES(?,?,?,?,?,?)',
       { replacements: [uuid(), id, item.item_id, item.quantity, item.rate, item.id], transaction: tx });
     await req.orgDb.query("UPDATE quotations SET status='converted' WHERE id=?", { replacements: [quotationId], transaction: tx });
-    await tx.commit(); return ok(res, { id, so_number: number, quotation_id: quotationId, status: 'confirmed' }, 'Sales order created');
+    await tx.commit();
+    handleSalesOrderConfirmed(req.orgDb, id, req.user.sub).catch(err => console.error('[AUTOMATION ERROR]:', err.message));
+    return ok(res, { id, so_number: number, quotation_id: quotationId, status: 'confirmed' }, 'Sales order created');
   } catch (error) { await tx.rollback(); throw error; }
 }));
 
@@ -330,6 +333,39 @@ workflow.get('/finance/tally/masters.xml', permission('finance', 'can_export'), 
   const [vendors] = await req.orgDb.query('SELECT * FROM vendors WHERE is_active=1');
   const xml = generateMastersXml(req.org.company_name, customers, vendors);
   res.type('application/xml').set('Content-Disposition', 'attachment; filename="tally_masters.xml"').send(xml);
+}));
+
+// ─────────────────────────────────────────────────────────────
+// PROCESS AUTOMATION HOOKS & CONFIGURATION
+// ─────────────────────────────────────────────────────────────
+
+// Explicit Sales Order confirmation (triggers auto-WO and shortfall PR)
+workflow.post('/sales/orders/:id/confirm', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
+  await req.orgDb.query("UPDATE sales_orders SET status = 'confirmed' WHERE id = ?", { replacements: [req.params.id] });
+  const autoResult = await handleSalesOrderConfirmed(req.orgDb, req.params.id, req.user.sub);
+  return ok(res, { id: req.params.id, status: 'confirmed', automation: autoResult }, 'Sales order confirmed and automations executed');
+}));
+
+// Explicit Work Order completion (triggers auto-backflushing of raw materials)
+workflow.post('/production/work-orders/:id/complete', permission('production', 'can_edit'), asyncHandler(async (req, res) => {
+  const producedQty = Number(req.body.produced_qty || 0);
+  await req.orgDb.query(
+    "UPDATE work_orders SET status = 'completed', produced_qty = GREATEST(produced_qty, ?), actual_end = NOW() WHERE id = ?",
+    { replacements: [producedQty, req.params.id] }
+  );
+  const autoResult = await handleWorkOrderCompleted(req.orgDb, req.params.id, producedQty, req.user.sub);
+  return ok(res, { id: req.params.id, status: 'completed', automation: autoResult }, 'Work order completed and inventory backflushed');
+}));
+
+// Organization Automation Rules
+workflow.get('/settings/automations', permission('settings', 'can_view'), asyncHandler(async (req, res) => {
+  const rules = await getAutomationRules(req.orgDb);
+  return ok(res, rules);
+}));
+
+workflow.put('/settings/automations', permission('settings', 'can_edit'), asyncHandler(async (req, res) => {
+  const updated = await saveAutomationRules(req.orgDb, req.body);
+  return ok(res, updated, 'Automation rules updated successfully');
 }));
 
 module.exports = workflow;

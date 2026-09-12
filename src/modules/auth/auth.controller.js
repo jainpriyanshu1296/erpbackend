@@ -65,4 +65,34 @@ const resetPassword = asyncHandler(async (req, res) => {
   if (!rows.length) return fail(res, 400, 'INVALID_TOKEN', 'Reset token is invalid or expired');
   await db.query('UPDATE users SET password_hash=? WHERE id=?', { replacements: [await bcrypt.hash(req.body.password, 12), rows[0].user_id] }); await db.query('UPDATE password_reset_tokens SET used_at=NOW() WHERE id=?', { replacements: [rows[0].id] }); return ok(res, null, 'Password reset successful');
 });
-module.exports = { register, login, me, refresh, logout, forgotPassword, resetPassword };
+
+const adminLogin = asyncHandler(async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return fail(res, 400, 'VALIDATION_ERROR', 'Email and password are required');
+
+  // Seed default superadmin if table is completely empty
+  const [allAdmins] = await masterDb.query('SELECT COUNT(*) as count FROM admin_users');
+  if (Number(allAdmins[0]?.count || 0) === 0) {
+    const defaultHash = await bcrypt.hash('Admin@123', 12);
+    await masterDb.query(
+      'INSERT INTO admin_users (id, name, email, password_hash, role, is_active) VALUES (?, ?, ?, ?, ?, 1)',
+      { replacements: [uuid(), 'Super Admin', 'admin@erp.com', defaultHash, 'superadmin'] }
+    );
+  }
+
+  const [admins] = await masterDb.query('SELECT * FROM admin_users WHERE email = ? AND is_active = 1', { replacements: [email] });
+  if (!admins.length || !(await bcrypt.compare(password, admins[0].password_hash))) {
+    return fail(res, 401, 'INVALID_CREDENTIALS', 'Invalid admin email or password');
+  }
+
+  const admin = admins[0];
+  const token = jwt.sign(
+    { sub: admin.id, name: admin.name, email: admin.email, role: admin.role || 'superadmin' },
+    secret(),
+    { expiresIn: '8h' }
+  );
+
+  return ok(res, { token, user: { id: admin.id, name: admin.name, email: admin.email, role: admin.role } }, 'Admin login successful');
+});
+
+module.exports = { register, login, me, refresh, logout, forgotPassword, resetPassword, adminLogin };

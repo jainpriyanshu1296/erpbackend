@@ -4,3 +4,5 @@ uploads/
 npm-debug.log*
 .DS_Store
 *.log
+*.zip
+New folder/
