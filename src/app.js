@@ -131,6 +131,56 @@ adminRouter.put('/organizations/:id/modules', asyncHandler(async (req, res) => {
 }));
 adminRouter.put('/modules/:id', asyncHandler(async (req, res) => { const keys = ['module_name','min_plan','sort_order']; const set = keys.filter(k => req.body[k] !== undefined); if (!set.length) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'No fields to update' }); await masterDb.query(`UPDATE modules SET ${set.map(k => `${k}=?`).join(',')} WHERE id=?`, { replacements: [...set.map(k => req.body[k]), req.params.id] }); return ok(res, { id: req.params.id, ...req.body }); }));
 app.use('/api/v1/admin', adminRouter);
+
+// Dedicated user management — overrides generic CRUD for /settings/users
+// POST: hash password before insert
+// PUT: allow password change with hashing
+const userRouter = express.Router();
+userRouter.use(auth, orgContext, activity);
+const { permission: perm } = (() => { try { return { permission: require('./middleware/permission') }; } catch { return { permission: () => (req, res, next) => next() }; } })();
+userRouter.get('/', perm('settings', 'can_view'), asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+  const [[count]] = await req.orgDb.query('SELECT COUNT(*) AS total FROM users');
+  const [rows] = await req.orgDb.query('SELECT id,name,email,role,department,phone,is_active,last_login,created_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?', { replacements: [limit, (page - 1) * limit] });
+  return ok(res, rows, 'Fetched successfully', { page, limit, total: Number(count.total || 0) });
+}));
+userRouter.post('/', perm('settings', 'can_create'), asyncHandler(async (req, res) => {
+  const { name, email, password, role, department, phone } = req.body;
+  if (!name || !email || !password || !role) return fail(res, 400, 'VALIDATION_ERROR', 'Name, email, password and role are required');
+  const bcrypt = require('bcryptjs');
+  const { v4: uuidv4 } = require('uuid');
+  const [existing] = await req.orgDb.query('SELECT id FROM users WHERE email = ?', { replacements: [email] });
+  if (existing.length) return fail(res, 409, 'CONFLICT', 'A user with this email already exists');
+  const hash = await bcrypt.hash(password, 12);
+  const id = uuidv4();
+  await req.orgDb.query('INSERT INTO users (id,name,email,password_hash,role,department,phone,is_active) VALUES (?,?,?,?,?,?,?,1)', { replacements: [id, name, email, hash, role, department || null, phone || null] });
+  return ok(res, { id, name, email, role }, 'User created successfully');
+}));
+userRouter.get('/:id', perm('settings', 'can_view'), asyncHandler(async (req, res) => {
+  const [rows] = await req.orgDb.query('SELECT id,name,email,role,department,phone,is_active,last_login,created_at FROM users WHERE id=?', { replacements: [req.params.id] });
+  return rows[0] ? ok(res, rows[0]) : fail(res, 404, 'NOT_FOUND', 'User not found');
+}));
+userRouter.put('/:id', perm('settings', 'can_edit'), asyncHandler(async (req, res) => {
+  const { password, ...rest } = req.body;
+  const allowed = ['name', 'role', 'department', 'phone', 'is_active'];
+  const keys = Object.keys(rest).filter(k => allowed.includes(k));
+  if (password) {
+    const bcrypt = require('bcryptjs');
+    const hash = await bcrypt.hash(password, 12);
+    keys.push('password_hash');
+    rest.password_hash = hash;
+  }
+  if (!keys.length) return fail(res, 400, 'VALIDATION_ERROR', 'No valid fields to update');
+  await req.orgDb.query(`UPDATE users SET ${keys.map(k => `${k}=?`).join(',')} WHERE id=?`, { replacements: [...keys.map(k => rest[k]), req.params.id] });
+  return ok(res, { id: req.params.id, ...rest }, 'User updated');
+}));
+userRouter.delete('/:id', perm('settings', 'can_delete'), asyncHandler(async (req, res) => {
+  // Soft delete — deactivate instead of hard delete
+  await req.orgDb.query('UPDATE users SET is_active=0 WHERE id=?', { replacements: [req.params.id] });
+  return ok(res, null, 'User deactivated');
+}));
+app.use('/api/v1/settings/users', userRouter);
 const mounts = [
   ['inventory/items','item_master','inventory'], ['inventory/stock','stock_summary','inventory'], ['inventory/ledger','stock_ledger','inventory'], ['inventory/gate-pass','gate_pass','inventory'],
   ['purchase/requisitions','purchase_requisitions','purchase'], ['purchase/orders','purchase_orders','purchase'], ['purchase/grn','grn','purchase'], ['vendors','vendors','purchase'],

@@ -17,6 +17,7 @@ const login = asyncHandler(async (req, res) => {
   const { email, password, org_slug } = req.body;
   const [orgs] = await masterDb.query('SELECT * FROM organizations WHERE slug = ? AND is_active = 1', { replacements: [org_slug || req.headers['x-org-slug']] });
   if (!orgs.length) return fail(res, 401, 'INVALID_CREDENTIALS', 'Invalid organization or credentials');
+  if (orgs[0].is_suspended) return fail(res, 403, 'ORG_SUSPENDED', 'This organization has been suspended. Please contact support.');
   const org = orgs[0]; const user = await findUser(getOrgDb(org.db_name), email);
   if (!user || !user.is_active || !(await bcrypt.compare(password || '', user.password_hash))) return fail(res, 401, 'INVALID_CREDENTIALS', 'Invalid credentials');
   const orgDb = getOrgDb(org.db_name); const token = signToken(user, org); const refresh_token = await issueRefresh(orgDb, user, org);
@@ -47,8 +48,8 @@ const refresh = asyncHandler(async (req, res) => {
 });
 const logout = asyncHandler(async (req, res) => { const [orgs] = await masterDb.query('SELECT db_name FROM organizations WHERE id=?', { replacements: [req.user.orgId] }); if (orgs.length) await getOrgDb(orgs[0].db_name).query('DELETE FROM refresh_tokens WHERE user_id=?', { replacements: [req.user.sub] }); return ok(res, null, 'Logged out'); });
 const forgotPassword = asyncHandler(async (req, res) => {
-  const [orgs] = await masterDb.query('SELECT db_name FROM organizations WHERE slug=? AND is_active=1', { replacements: [req.body.org_slug || req.headers['x-org-slug']] });
-  if (!orgs.length) return ok(res, null, 'If the account exists, reset instructions were sent');
+  const [orgs] = await masterDb.query('SELECT db_name, is_suspended FROM organizations WHERE slug=? AND is_active=1', { replacements: [req.body.org_slug || req.headers['x-org-slug']] });
+  if (!orgs.length || orgs[0].is_suspended) return ok(res, null, 'If the account exists, reset instructions were sent');
   const db = getOrgDb(orgs[0].db_name); const [users] = await db.query('SELECT id FROM users WHERE email=? AND is_active=1', { replacements: [req.body.email] });
   if (users.length) {
     const raw = crypto.randomBytes(32).toString('hex');
