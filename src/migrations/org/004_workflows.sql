@@ -22,8 +22,8 @@ CREATE TABLE IF NOT EXISTS sales_order_items (
   item_id VARCHAR(36) NOT NULL, quantity DECIMAL(14,3) NOT NULL, rate DECIMAL(14,2) DEFAULT 0,
   INDEX idx_so_items_order(order_id)
 );
-ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36), ADD COLUMN IF NOT EXISTS requisition_id VARCHAR(36);
-ALTER TABLE purchase_requisitions ADD COLUMN IF NOT EXISTS required_by DATE, ADD COLUMN IF NOT EXISTS department_id INT;
-ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS delivery_date DATE, ADD COLUMN IF NOT EXISTS payment_terms INT DEFAULT 30;
-ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS quotation_id VARCHAR(36);
-ALTER TABLE invoices ADD COLUMN IF NOT EXISTS order_id VARCHAR(36);
+ALTER TABLE purchase_orders ADD COLUMN warehouse_id VARCHAR(36), ADD COLUMN requisition_id VARCHAR(36);
+ALTER TABLE purchase_requisitions ADD COLUMN required_by DATE, ADD COLUMN department_id INT;
+ALTER TABLE purchase_orders ADD COLUMN delivery_date DATE, ADD COLUMN payment_terms INT DEFAULT 30;
+ALTER TABLE sales_orders ADD COLUMN quotation_id VARCHAR(36);
+ALTER TABLE invoices ADD COLUMN order_id VARCHAR(36);

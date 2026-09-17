@@ -26,17 +26,17 @@ CREATE TABLE IF NOT EXISTS wo_routing_operations (
 
 -- 2. Multi-Level / Sub-Assembly BOM columns
 ALTER TABLE bom_components
-  ADD COLUMN IF NOT EXISTS parent_component_id VARCHAR(36) NULL,
-  ADD COLUMN IF NOT EXISTS component_type VARCHAR(30) DEFAULT 'raw_material',
-  ADD COLUMN IF NOT EXISTS level INT DEFAULT 1;
+  ADD COLUMN parent_component_id VARCHAR(36) NULL,
+  ADD COLUMN component_type VARCHAR(30) DEFAULT 'raw_material',
+  ADD COLUMN level INT DEFAULT 1;
 
 -- 3. Job Work Section 143 (CGST Act) Compliance Columns
 ALTER TABLE job_work_orders
-  ADD COLUMN IF NOT EXISTS challan_type VARCHAR(30) DEFAULT 'inputs',
-  ADD COLUMN IF NOT EXISTS dispatch_date DATE,
-  ADD COLUMN IF NOT EXISTS due_date DATE,
-  ADD COLUMN IF NOT EXISTS itc04_quarter VARCHAR(20),
-  ADD COLUMN IF NOT EXISTS compliance_status VARCHAR(30) DEFAULT 'compliant';
+  ADD COLUMN challan_type VARCHAR(30) DEFAULT 'inputs',
+  ADD COLUMN dispatch_date DATE,
+  ADD COLUMN due_date DATE,
+  ADD COLUMN itc04_quarter VARCHAR(20),
+  ADD COLUMN compliance_status VARCHAR(30) DEFAULT 'compliant';
 
 -- 4. Tally Sync & Export Logs
 CREATE TABLE IF NOT EXISTS tally_sync_logs (

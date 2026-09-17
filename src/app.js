@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -23,6 +24,7 @@ const requireAdmin = (req, res, next) => {
   return res.status(403).json({ success: false, error: 'FORBIDDEN', message: 'Administrator access required' });
 };
 const app = express();
+app.set('trust proxy',1);
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',').map(value => value.trim()).filter(Boolean);
 app.use(cors({ origin: (origin, callback) => {
   if (!origin || allowedOrigins.includes(origin)) return callback(null, true);

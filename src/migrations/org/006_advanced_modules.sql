@@ -5,7 +5,7 @@
 
 -- 1. Anti-Double-Selling: Stock Reservation column
 ALTER TABLE stock_summary
-  ADD COLUMN IF NOT EXISTS reserved_qty DECIMAL(10,3) DEFAULT 0;
+  ADD COLUMN reserved_qty DECIMAL(10,3) DEFAULT 0;
 
 -- 2. Vendor Debit Notes on QC Rejection
 CREATE TABLE IF NOT EXISTS debit_notes (
@@ -37,20 +37,20 @@ CREATE TABLE IF NOT EXISTS debit_note_items (
 
 -- 3. GST E-Invoice Columns on Invoices
 ALTER TABLE invoices
-  ADD COLUMN IF NOT EXISTS irn VARCHAR(100) NULL,
-  ADD COLUMN IF NOT EXISTS signed_qr_code TEXT NULL,
-  ADD COLUMN IF NOT EXISTS ack_no VARCHAR(50) NULL,
-  ADD COLUMN IF NOT EXISTS ack_date DATETIME NULL,
-  ADD COLUMN IF NOT EXISTS einvoice_status VARCHAR(30) DEFAULT 'pending';
+  ADD COLUMN irn VARCHAR(100) NULL,
+  ADD COLUMN signed_qr_code TEXT NULL,
+  ADD COLUMN ack_no VARCHAR(50) NULL,
+  ADD COLUMN ack_date DATETIME NULL,
+  ADD COLUMN einvoice_status VARCHAR(30) DEFAULT 'pending';
 
 -- 4. E-Way Bill Columns on Delivery Challans
 ALTER TABLE delivery_challans
-  ADD COLUMN IF NOT EXISTS sales_order_id VARCHAR(36) NULL,
-  ADD COLUMN IF NOT EXISTS eway_bill_no VARCHAR(50) NULL,
-  ADD COLUMN IF NOT EXISTS eway_bill_date DATETIME NULL,
-  ADD COLUMN IF NOT EXISTS valid_until DATETIME NULL,
-  ADD COLUMN IF NOT EXISTS vehicle_number VARCHAR(50) NULL,
-  ADD COLUMN IF NOT EXISTS eway_bill_status VARCHAR(30) DEFAULT 'pending';
+  ADD COLUMN sales_order_id VARCHAR(36) NULL,
+  ADD COLUMN eway_bill_no VARCHAR(50) NULL,
+  ADD COLUMN eway_bill_date DATETIME NULL,
+  ADD COLUMN valid_until DATETIME NULL,
+  ADD COLUMN vehicle_number VARCHAR(50) NULL,
+  ADD COLUMN eway_bill_status VARCHAR(30) DEFAULT 'pending';
 
 -- 5. Delivery Challan Line Items
 CREATE TABLE IF NOT EXISTS delivery_challan_items (
