@@ -35,7 +35,11 @@ app.get('/health', (req, res) => ok(res, { service: 'erp-api', status: 'ok', tim
 app.use('/api/v1/auth', authRoutes);
 const protectedRouter = express.Router(); protectedRouter.use(auth, orgContext, activity);
 protectedRouter.get('/org/info', (req, res) => ok(res, req.org));
-protectedRouter.get('/org/modules', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT m.*, CASE WHEN om.is_active IS NOT NULL THEN om.is_active WHEN FIELD(m.min_plan,'free','starter','growth','pro') <= FIELD(?,'free','starter','growth','pro') THEN 1 ELSE 0 END AS is_enabled FROM modules m LEFT JOIN org_modules om ON om.module_key=m.module_key AND om.org_id=? ORDER BY m.sort_order', { replacements: [req.org.plan, req.org.id] }); return ok(res, rows); }));
+protectedRouter.get('/org/modules', asyncHandler(async (req, res) => {
+  const sql = `SELECT m.*, CASE WHEN om.is_active IS NOT NULL THEN om.is_active WHEN FIELD(m.min_plan,'free','starter','growth','pro') <= FIELD(?,'free','starter','growth','pro') THEN 1 ELSE 0 END AS is_enabled FROM modules m LEFT JOIN org_modules om ON om.module_key=m.module_key AND om.org_id=? ORDER BY m.sort_order`;
+  const [rows] = await masterDb.query(sql, { replacements: [req.org.plan, req.org.id] });
+  return ok(res, rows);
+}));
 protectedRouter.put('/org/modules/:key/toggle', asyncHandler(async (req, res) => {
   const { key } = req.params;
   const [mod] = await masterDb.query('SELECT * FROM modules WHERE module_key=?', { replacements: [key] });
@@ -83,7 +87,7 @@ protectedRouter.get('/inventory/stock', asyncHandler(async (req, res) => {
     ORDER BY ss.last_updated DESC LIMIT ? OFFSET ?`, { replacements });
   return ok(res, rows);
 }));
-protectedRouter.post('/inventory/stock/adjust', , asyncHandler(async (req, res) => ok(res, await postStockAdjustment(req.orgDb, req.body, req.user.sub), 'Stock posted')));
+protectedRouter.post('/inventory/stock/adjust', asyncHandler(async (req, res) => ok(res, await postStockAdjustment(req.orgDb, req.body, req.user.sub), 'Stock posted')));
 protectedRouter.post('/sales/invoices/:id/payments', asyncHandler(async (req, res) => ok(res, await recordInvoicePayment(req.orgDb, req.params.id, req.body.amount, req.body, req.user.sub), 'Payment recorded')));
 protectedRouter.post('/finance/gst/calculate', asyncHandler(async (req, res) => ok(res, calculateGST(req.body.items, req.org.state, req.body.customer_state || req.body.customerState))));
 protectedRouter.post('/hr/payroll/calculate', asyncHandler(async (req, res) => { if (!req.body.employee) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'employee is required' }); return ok(res, calculatePayroll(req.body.employee, req.body.attendance, req.body.deductions)); }));
@@ -139,7 +143,7 @@ adminRouter.post('/organizations', asyncHandler(async (req, res) => {
   const dbName = 'erp_org_' + slug.replace(/-/g,'_');
   const orgDb = require('./config/orgDb');
   const db = await orgDb(slug);
-  await db.query('INSERT INTO users(id,name,email,password_hash,role,is_active) VALUES(?,?,?,?,'admin',1)', { replacements: [uuid(), owner_name||company_name, owner_email, hashedPw] });
+  await db.query(`INSERT INTO users(id,name,email,password_hash,role,is_active) VALUES(?,?,?,?,'admin',1)`, { replacements: [uuid(), owner_name||company_name, owner_email, hashedPw] });
   return ok(res, { id: orgId, slug, company_name, plan: chosenPlan }, 'Organization created');
 }));
 adminRouter.get('/modules', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT * FROM modules ORDER BY sort_order'); return ok(res, rows); }));
