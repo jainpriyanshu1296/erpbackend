@@ -35,7 +35,7 @@ app.get('/health', (req, res) => ok(res, { service: 'erp-api', status: 'ok', tim
 app.use('/api/v1/auth', authRoutes);
 const protectedRouter = express.Router(); protectedRouter.use(auth, orgContext, activity);
 protectedRouter.get('/org/info', (req, res) => ok(res, req.org));
-protectedRouter.get('/org/modules', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT m.*, COALESCE(om.is_active, 1) as is_enabled FROM modules m LEFT JOIN org_modules om ON om.module_key=m.module_key AND om.org_id=? WHERE m.min_plan <= ? OR om.is_active=1 ORDER BY m.sort_order', { replacements: [req.org.id, req.org.plan] }); return ok(res, rows); }));
+protectedRouter.get('/org/modules', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT m.*, CASE WHEN om.is_active IS NOT NULL THEN om.is_active WHEN FIELD(m.min_plan,'free','starter','growth','pro') <= FIELD(?,'free','starter','growth','pro') THEN 1 ELSE 0 END AS is_enabled FROM modules m LEFT JOIN org_modules om ON om.module_key=m.module_key AND om.org_id=? ORDER BY m.sort_order', { replacements: [req.org.plan, req.org.id] }); return ok(res, rows); }));
 protectedRouter.put('/org/modules/:key/toggle', asyncHandler(async (req, res) => {
   const { key } = req.params;
   const [mod] = await masterDb.query('SELECT * FROM modules WHERE module_key=?', { replacements: [key] });
@@ -67,7 +67,23 @@ protectedRouter.post('/billing/verify-payment', asyncHandler(async (req, res) =>
 }));
 protectedRouter.patch('/notifications/:id/read', asyncHandler(async (req, res) => { await req.orgDb.query('UPDATE notifications SET is_read=1,read_at=NOW() WHERE id=? AND (user_id IS NULL OR user_id=?)', { replacements: [req.params.id, req.user.sub] }); return ok(res, { id: req.params.id, is_read: true }); }));
 protectedRouter.post('/notifications/read-all', asyncHandler(async (req, res) => { await req.orgDb.query('UPDATE notifications SET is_read=1,read_at=NOW() WHERE user_id IS NULL OR user_id=?', { replacements: [req.user.sub] }); return ok(res, null, 'Notifications marked as read'); }));
-protectedRouter.post('/inventory/stock/adjust', asyncHandler(async (req, res) => ok(res, await postStockAdjustment(req.orgDb, req.body, req.user.sub), 'Stock posted')));
+protectedRouter.get('/inventory/stock', asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Number(req.query.limit || 20));
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const where = search ? ' AND (im.item_name LIKE ? OR im.item_code LIKE ? OR w.name LIKE ?)' : '';
+  const replacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`, limit, (page - 1) * limit] : [limit, (page - 1) * limit];
+  const [rows] = await req.orgDb.query(`
+    SELECT ss.item_id, ss.warehouse_id, ss.current_qty, ss.avg_rate, ss.total_value, ss.last_updated,
+           im.item_code, im.item_name, im.uom_id, w.name AS warehouse_name
+    FROM stock_summary ss
+    LEFT JOIN item_master im ON im.id = ss.item_id
+    LEFT JOIN warehouses w ON w.id = ss.warehouse_id
+    WHERE 1=1 ${where}
+    ORDER BY ss.last_updated DESC LIMIT ? OFFSET ?`, { replacements });
+  return ok(res, rows);
+}));
+protectedRouter.post('/inventory/stock/adjust', , asyncHandler(async (req, res) => ok(res, await postStockAdjustment(req.orgDb, req.body, req.user.sub), 'Stock posted')));
 protectedRouter.post('/sales/invoices/:id/payments', asyncHandler(async (req, res) => ok(res, await recordInvoicePayment(req.orgDb, req.params.id, req.body.amount, req.body, req.user.sub), 'Payment recorded')));
 protectedRouter.post('/finance/gst/calculate', asyncHandler(async (req, res) => ok(res, calculateGST(req.body.items, req.org.state, req.body.customer_state || req.body.customerState))));
 protectedRouter.post('/hr/payroll/calculate', asyncHandler(async (req, res) => { if (!req.body.employee) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'employee is required' }); return ok(res, calculatePayroll(req.body.employee, req.body.attendance, req.body.deductions)); }));
@@ -109,7 +125,23 @@ app.use('/api/v1/reports', smartReportsRoutes);
 const adminRouter = express.Router();
 adminRouter.use(auth, requireAdmin);
 adminRouter.get('/dashboard', asyncHandler(async (req, res) => { const [[organizations]] = await masterDb.query('SELECT COUNT(*) total FROM organizations'); return ok(res, { organizations: organizations.total }); }));
-adminRouter.get('/organizations', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT id,slug,company_name,owner_email,plan,is_active,is_suspended,created_at FROM organizations ORDER BY created_at DESC'); return ok(res, rows); }));
+adminRouter.get('/organizations', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT id,slug,company_name,owner_email,owner_phone,plan,is_active,is_suspended,created_at FROM organizations ORDER BY created_at DESC'); return ok(res, rows); }));
+adminRouter.post('/organizations', asyncHandler(async (req, res) => {
+  const { company_name, owner_name, owner_email, owner_phone, slug, plan, password } = req.body;
+  if (!company_name || !owner_email || !slug || !password) return fail(res, 400, 'VALIDATION_ERROR', 'company_name, owner_email, slug, password required');
+  const validPlans = ['free','starter','growth','pro'];
+  const chosenPlan = validPlans.includes(plan) ? plan : 'free';
+  const { hashPassword } = require('./middleware/auth');
+  const bcrypt = require('bcryptjs');
+  const orgId = uuid();
+  const hashedPw = await bcrypt.hash(password, 10);
+  await masterDb.query('INSERT INTO organizations(id,slug,company_name,owner_name,owner_email,owner_phone,plan,is_active,created_at) VALUES(?,?,?,?,?,?,?,1,NOW())', { replacements: [orgId, slug, company_name, owner_name||company_name, owner_email, owner_phone||'', chosenPlan] });
+  const dbName = 'erp_org_' + slug.replace(/-/g,'_');
+  const orgDb = require('./config/orgDb');
+  const db = await orgDb(slug);
+  await db.query('INSERT INTO users(id,name,email,password_hash,role,is_active) VALUES(?,?,?,?,'admin',1)', { replacements: [uuid(), owner_name||company_name, owner_email, hashedPw] });
+  return ok(res, { id: orgId, slug, company_name, plan: chosenPlan }, 'Organization created');
+}));
 adminRouter.get('/modules', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT * FROM modules ORDER BY sort_order'); return ok(res, rows); }));
 adminRouter.post('/organizations/:id/suspend', asyncHandler(async (req, res) => { await masterDb.query('UPDATE organizations SET is_suspended=1,suspension_reason=? WHERE id=?', { replacements: [req.body.reason || 'Suspended by administrator', req.params.id] }); return ok(res, { id: req.params.id, is_suspended: true }); }));
 adminRouter.post('/organizations/:id/activate', asyncHandler(async (req, res) => { await masterDb.query('UPDATE organizations SET is_suspended=0,is_active=1 WHERE id=?', { replacements: [req.params.id] }); return ok(res, { id: req.params.id, is_suspended: false, is_active: true }); }));
@@ -192,7 +224,7 @@ userRouter.delete('/:id', perm('settings', 'can_delete'), asyncHandler(async (re
 }));
 app.use('/api/v1/settings/users', userRouter);
 const mounts = [
-  ['inventory/items','item_master','inventory'], ['inventory/stock','stock_summary','inventory'], ['inventory/ledger','stock_ledger','inventory'], ['inventory/gate-pass','gate_pass','inventory'],
+  ['inventory/items','item_master','inventory'], ['inventory/ledger','stock_ledger','inventory'], ['inventory/gate-pass','gate_pass','inventory'],
   ['purchase/requisitions','purchase_requisitions','purchase'], ['purchase/orders','purchase_orders','purchase'], ['purchase/grn','grn','purchase'], ['vendors','vendors','purchase'],
   ['customers','customers','sales'], ['production/bom','bom','production'], ['production/work-orders','work_orders','production'], ['jobwork/orders','job_work_orders','jobwork'],
   ['quality/inspections','qc_inspections','quality'], ['sales/quotations','quotations','sales'], ['sales/orders','sales_orders','sales'], ['sales/invoices','invoices','sales'],
