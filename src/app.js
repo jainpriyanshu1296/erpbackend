@@ -131,6 +131,14 @@ adminRouter.put('/organizations/:id/modules', asyncHandler(async (req, res) => {
   );
   return ok(res, { org_id: req.params.id, module_key, is_active: Boolean(activeVal) }, 'Org module updated');
 }));
+adminRouter.put('/organizations/:id/plan', asyncHandler(async (req, res) => {
+  const { plan } = req.body;
+  const validPlans = ['free', 'starter', 'growth', 'pro'];
+  if (!plan || !validPlans.includes(plan)) return fail(res, 400, 'VALIDATION_ERROR', 'Invalid plan. Must be: free, starter, growth, pro');
+  await masterDb.query('UPDATE organizations SET plan=?, plan_started_at=NOW(), is_trial=0 WHERE id=?', { replacements: [plan, req.params.id] });
+  return ok(res, { id: req.params.id, plan }, 'Plan updated');
+
+}));
 adminRouter.put('/modules/:id', asyncHandler(async (req, res) => { const keys = ['module_name','min_plan','sort_order']; const set = keys.filter(k => req.body[k] !== undefined); if (!set.length) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'No fields to update' }); await masterDb.query(`UPDATE modules SET ${set.map(k => `${k}=?`).join(',')} WHERE id=?`, { replacements: [...set.map(k => req.body[k]), req.params.id] }); return ok(res, { id: req.params.id, ...req.body }); }));
 app.use('/api/v1/admin', adminRouter);
 
