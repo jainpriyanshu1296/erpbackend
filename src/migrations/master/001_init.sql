@@ -15,3 +15,7 @@ CREATE TABLE IF NOT EXISTS admin_users (id VARCHAR(36) PRIMARY KEY, name VARCHAR
 CREATE TABLE IF NOT EXISTS plan_pricing (id INT AUTO_INCREMENT PRIMARY KEY, plan VARCHAR(20), duration_months INT, amount DECIMAL(10,2), is_active TINYINT(1) DEFAULT 1);
 INSERT IGNORE INTO modules(module_key,module_name,min_plan,sort_order) VALUES
 ('dashboard','Dashboard','free',1),('purchase','Purchase & Procurement','starter',2),('inventory','Inventory & Warehouse','free',3),('production','Production & BOM','growth',4),('jobwork','Job Work','pro',5),('quality','Quality Control','growth',6),('sales','Sales & Dispatch','starter',7),('finance','Finance & Accounts','starter',8),('gst','GST & Compliance','starter',9),('hr','HR & Payroll','growth',10),('reports','Reports & Analytics','starter',11);
+INSERT IGNORE INTO plan_pricing(plan,duration_months,amount,is_active) VALUES
+('starter',1,999,1),('starter',12,9999,1),
+('growth',1,2499,1),('growth',12,24999,1),
+('pro',1,4999,1),('pro',12,49999,1);

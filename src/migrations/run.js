@@ -18,23 +18,45 @@ async function applyMigrationsToDb(conn, dbName, kind) {
       applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  await conn.query(`CREATE TABLE IF NOT EXISTS migration_locks (
+    lock_name VARCHAR(100) PRIMARY KEY, owner_id VARCHAR(100) NOT NULL,
+    acquired_at DATETIME NOT NULL, expires_at DATETIME NOT NULL
+  )`);
 
-  const [appliedRows] = await conn.query('SELECT migration_name FROM _migrations');
-  const appliedSet = new Set(appliedRows.map(r => r.migration_name));
-
-  const dir = path.join(__dirname, kind);
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort();
-
-  for (const file of files) {
-    if (appliedSet.has(file)) {
-      console.log(`[SKIPPED] ${file} (already applied)`);
-      continue;
+  const lockName = `migration:${kind}:${dbName}`;
+  const owner = `${process.pid}:${Date.now()}`;
+  await conn.query(
+    `INSERT INTO migration_locks(lock_name,owner_id,acquired_at,expires_at)
+     VALUES(?,?,NOW(),DATE_ADD(NOW(), INTERVAL 10 MINUTE))
+     ON DUPLICATE KEY UPDATE owner_id=IF(expires_at < NOW(), VALUES(owner_id), owner_id),
+       acquired_at=IF(expires_at < NOW(), VALUES(acquired_at), acquired_at),
+       expires_at=IF(expires_at < NOW(), VALUES(expires_at), expires_at)`,
+    [lockName, owner]
+  );
+  const [locks] = await conn.query('SELECT owner_id FROM migration_locks WHERE lock_name=?', [lockName]);
+  if (!locks.length || locks[0].owner_id !== owner) throw new Error(`Migration already running for ${dbName}`);
+  try {
+    const [appliedRows] = await conn.query('SELECT migration_name FROM _migrations');
+    const appliedSet = new Set(appliedRows.map(r => r.migration_name));
+    const dir = path.join(__dirname, kind);
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort();
+    for (const file of files) {
+      if (appliedSet.has(file)) {
+        console.log(`[SKIPPED] ${file} (already applied)`);
+        continue;
+      }
+      console.log(`[APPLYING] ${file}...`);
+      const sql = fs.readFileSync(path.join(dir, file), 'utf8');
+      try {
+        await conn.query(sql);
+        await conn.query('INSERT INTO _migrations (migration_name) VALUES (?)', [file]);
+      } catch (error) {
+        throw new Error(`Migration ${file} failed for ${dbName}: ${error.message}`);
+      }
+      console.log(`[DONE] ${file}`);
     }
-    console.log(`[APPLYING] ${file}...`);
-    const sql = fs.readFileSync(path.join(dir, file), 'utf8');
-    await conn.query(sql);
-    await conn.query('INSERT INTO _migrations (migration_name) VALUES (?)', [file]);
-    console.log(`[DONE] ${file}`);
+  } finally {
+    await conn.query('DELETE FROM migration_locks WHERE lock_name=? AND owner_id=?', [lockName, owner]).catch(() => {});
   }
 }
 
@@ -61,13 +83,7 @@ async function run() {
         await conn.query(`USE \`${masterDb.replace(/`/g, '')}\``);
         const [orgs] = await conn.query('SELECT db_name, company_name FROM organizations WHERE is_active=1');
         console.log(`Found ${orgs.length} active organizations for migration.`);
-        for (const org of orgs) {
-          try {
-            await applyMigrationsToDb(conn, org.db_name, 'org');
-          } catch (err) {
-            console.error(`[ERROR] Failed to migrate ${org.db_name} (${org.company_name}):`, err.message);
-          }
-        }
+        for (const org of orgs) await applyMigrationsToDb(conn, org.db_name, 'org');
       } else {
         if (!target) {
           throw new Error('Please specify an org database name (e.g. node src/migrations/run.js org org_acme) or use --all');
@@ -83,8 +99,11 @@ async function run() {
   }
 }
 
-run().catch(err => {
-  console.error('[FATAL] Migration error:', err);
-  process.exit(1);
-});
+if (require.main === module) {
+  run().catch(err => {
+    console.error('[FATAL] Migration error:', err);
+    process.exit(1);
+  });
+}
 
+module.exports = { applyMigrationsToDb, run };

@@ -1,0 +1,19 @@
+USE `erp_master`;
+
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS must_change_password TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions
+  ADD COLUMN IF NOT EXISTS activated_at DATETIME NULL,
+  ADD COLUMN IF NOT EXISTS provider VARCHAR(30) NULL;
+
+CREATE TABLE IF NOT EXISTS provisioning_jobs (
+  id VARCHAR(36) PRIMARY KEY, organization_id VARCHAR(36) NOT NULL UNIQUE,
+  status VARCHAR(30) NOT NULL DEFAULT 'pending', attempts INT NOT NULL DEFAULT 0,
+  last_error TEXT NULL, next_attempt_at DATETIME NULL, started_at DATETIME NULL,
+  completed_at DATETIME NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_provisioning_org FOREIGN KEY (organization_id) REFERENCES organizations(id)
+);
+CREATE TABLE IF NOT EXISTS migration_locks (
+  lock_name VARCHAR(100) PRIMARY KEY, owner_id VARCHAR(100) NOT NULL,
+  acquired_at DATETIME NOT NULL, expires_at DATETIME NOT NULL
+);

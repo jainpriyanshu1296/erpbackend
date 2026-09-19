@@ -1,0 +1,24 @@
+-- Additive accounting integration fields and explicit expense approval state.
+ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS taxable_amount DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS cgst DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS sgst DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS igst DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS approved_by VARCHAR(36) NULL;
+ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS approved_at DATETIME NULL;
+ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS posted_at DATETIME NULL;
+ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS journal_id VARCHAR(36) NULL;
+ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS contra_account_id VARCHAR(36) NULL;
+ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS taxable_amount DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS cgst DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS sgst DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS igst DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS taxable_amount DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS cgst DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS sgst DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS igst DECIMAL(14,2) NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS expense_approvals (
+  id VARCHAR(36) PRIMARY KEY, document_id VARCHAR(36) NOT NULL,
+  status ENUM('pending','approved','rejected','posted') NOT NULL DEFAULT 'pending',
+  requested_by VARCHAR(36), decided_by VARCHAR(36), decided_at DATETIME NULL,
+  UNIQUE KEY uq_expense_document(document_id)
+);

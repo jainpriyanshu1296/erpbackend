@@ -1,0 +1,2 @@
+ALTER TABLE finance_documents
+  ADD COLUMN IF NOT EXISTS paid_amount DECIMAL(14,2) NOT NULL DEFAULT 0;

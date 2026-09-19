@@ -1,5 +1,6 @@
 const express = require('express');
 const { v4: uuid } = require('uuid');
+const { postInvoiceEffect } = require('../services/accounting.service');
 const { ok, fail, asyncHandler } = require('../utils/response');
 const { nextNumber } = require('../services/erp.service');
 const { generateSalesXml, generatePurchaseXml, generateMastersXml } = require('../services/tally-export.service');
@@ -20,7 +21,7 @@ const activity = require('../middleware/activity');
 
 const invalid = message => Object.assign(new Error(message), { status: 400, code: 'VALIDATION_ERROR' });
 const workflow = express.Router();
-workflow.use(require('../middleware/auth').auth, require('../middleware/orgContext'), activity);
+workflow.use(require('../middleware/auth').auth, require('../middleware/orgContext'), require('../middleware/entitlement'), activity);
 
 async function lines(db, table, foreignKey, id, transaction) {
   const [rows] = await db.query(`SELECT * FROM ${table} WHERE ${foreignKey}=? ORDER BY id`, { replacements: [id], transaction });
@@ -168,8 +169,11 @@ workflow.post('/sales/orders/from-quotation', permission('sales', 'can_create'),
   const { quotation_id: quotationId } = req.body;
   const tx = await req.orgDb.transaction();
   try {
-    const [quote] = await req.orgDb.query("SELECT * FROM quotations WHERE id=? AND status IN ('accepted','approved') FOR UPDATE", { replacements: [quotationId], transaction: tx });
+    const [quote] = await req.orgDb.query("SELECT * FROM quotations WHERE id=? FOR UPDATE", { replacements: [quotationId], transaction: tx });
     if (!quote.length) throw invalid('Only an accepted quotation can create an order');
+    const [existing] = await req.orgDb.query('SELECT id,so_number,status FROM sales_orders WHERE quotation_id=? LIMIT 1 FOR UPDATE', { replacements: [quotationId], transaction: tx });
+    if (existing.length) { await tx.commit(); return ok(res, { id: existing[0].id, so_number: existing[0].so_number, quotation_id: quotationId, status: existing[0].status, already_converted: true }, 'Sales order already exists'); }
+    if (!['accepted', 'approved'].includes(quote[0].status)) throw invalid('Only an accepted quotation can create an order');
     const source = await lines(req.orgDb, 'quotation_items', 'quotation_id', quotationId, tx);
     if (!source.length) throw invalid('Quotation has no items');
     const id = uuid(), number = await nextNumber(req.orgDb, 'sales_order', 'SO-', 5, tx);
@@ -193,7 +197,19 @@ workflow.post('/sales/invoices/from-order', permission('sales', 'can_create'), a
     const id = uuid(), number = await nextNumber(req.orgDb, 'invoice', 'INV-', 5, tx);
     await req.orgDb.query("INSERT INTO invoices(id,invoice_number,order_id,customer_id,invoice_date,status,total_amount,balance_amount) VALUES(?,?,?, ?,CURDATE(),'draft',?,?)",
       { replacements: [id, number, orderId, order[0].customer_id, order[0].total_amount || 0, order[0].total_amount || 0], transaction: tx });
+    const [orderItems] = await req.orgDb.query(
+      'SELECT item_id,quantity,rate FROM sales_order_items WHERE order_id=?',
+      { replacements: [orderId], transaction: tx }
+    );
+    for (const item of orderItems) {
+      const taxable = Number(item.quantity || 0) * Number(item.rate || 0);
+      await req.orgDb.query(
+        'INSERT INTO invoice_items(id,invoice_id,item_id,quantity,rate,taxable,total) VALUES(?,?,?,?,?,?,?)',
+        { replacements: [uuid(), id, item.item_id, item.quantity, item.rate, taxable, taxable], transaction: tx }
+      );
+    }
     await req.orgDb.query("UPDATE sales_orders SET status='invoiced' WHERE id=?", { replacements: [orderId], transaction: tx });
+    await postInvoiceEffect(req.orgDb, id, req.user.sub, tx);
     await tx.commit(); return ok(res, { id, invoice_number: number, order_id: orderId, status: 'draft' }, 'Invoice created');
   } catch (error) { await tx.rollback(); throw error; }
 }));
@@ -569,4 +585,3 @@ workflow.post('/sales/challans/verify-scan', permission('sales', 'can_view'), as
 }));
 
 module.exports = workflow;
-

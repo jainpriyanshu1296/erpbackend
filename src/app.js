@@ -1,5 +1,7 @@
 
 require('dotenv').config();
+const { validateEnv } = require('./config/env');
+validateEnv();
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -16,34 +18,71 @@ const workflowRoutes = require('./modules/workflows');
 const authRoutes = require('./modules/auth/auth.routes');
 const forecastingRoutes = require('./modules/forecasting/forecasting.routes');
 const smartReportsRoutes = require('./modules/reports/smart-reports.routes');
+const inventoryPurchaseRoutes = require('./modules/inventoryPurchase.routes');
+const { sales: salesProductionSalesRoutes, production: salesProductionProductionRoutes } = require('./modules/salesProduction.routes');
+const zeroGapClosureRoutes = require('./modules/zeroGapClosure.routes');
+const nextDomainsRoutes = require('./modules/nextDomains.routes');
+const operationalDomainsRoutes = require('./modules/operationalDomains.routes');
+const operationalDomains = require('./services/operationalDomains.service');
+const publicRoutes = require('./modules/public/public.routes');
+const onboardingRoutes = require('./modules/public/onboarding.routes');
+const { processPaymentWebhook, createPendingOrder, verifyPendingPayment, provisionOrganization } = require('./services/onboarding.service');
 const masterDb = require('./config/db');
 const { MODULES } = require('./config/constants');
 const { v4: uuid } = require('uuid');
+const requestContext = require('./middleware/requestContext');
+const { securityHeaders } = require('./middleware/security');
+const entitlement = require('./middleware/entitlement');
+const permission = require('./middleware/permission');
+const { logApiError } = require('./middleware/errorAudit');
 const requireAdmin = (req, res, next) => {
-  if (req.user?.role === 'superadmin' || req.user?.role === 'support') return next();
+  if (req.user?.role === 'superadmin') return next();
   return res.status(403).json({ success: false, error: 'FORBIDDEN', message: 'Administrator access required' });
 };
 const app = express();
-app.set('trust proxy',1);
+app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? true : (Number(process.env.TRUST_PROXY || 0) || 0));
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',').map(value => value.trim()).filter(Boolean);
-app.use(cors({ origin: (origin, callback) => {
+app.use(cors({ credentials: true, origin: (origin, callback) => {
   if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
   return callback(new Error('Origin is not allowed by CORS'));
 } }));
+app.use(requestContext);
+app.use(securityHeaders);
+app.post('/api/v1/public/onboarding/payments/webhook', express.raw({ type: 'application/json' }), asyncHandler(async (req, res) => ok(res, await processPaymentWebhook(req.body, req.get('x-razorpay-signature')), 'Webhook processed')));
 app.use(express.json({ limit: '2mb' })); app.use(express.urlencoded({ extended: true })); app.use(rateLimiter);
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    if (res.statusCode >= 400 && !res.locals.errorLogged) {
+      res.locals.errorLogged = true;
+      logApiError(req, res);
+    }
+  });
+  next();
+});
+app.get('/health/live', (req, res) => ok(res, { service: 'erp-api', status: 'ok', timestamp: new Date().toISOString() }));
+app.get('/health/ready', asyncHandler(async (req, res) => {
+  await masterDb.authenticate();
+  return ok(res, { service: 'erp-api', status: 'ready', master_db: 'ok', timestamp: new Date().toISOString() });
+}));
 app.get('/health', (req, res) => ok(res, { service: 'erp-api', status: 'ok', timestamp: new Date().toISOString() }));
+app.use('/api/v1/public', publicRoutes);
+app.use('/api/v1/public/onboarding', onboardingRoutes);
 app.use('/api/v1/auth', authRoutes);
-const protectedRouter = express.Router(); protectedRouter.use(auth, orgContext, activity);
-protectedRouter.get('/org/info', (req, res) => ok(res, req.org));
-protectedRouter.get('/org/modules', asyncHandler(async (req, res) => {
+const protectedRouter = express.Router(); protectedRouter.use(auth, orgContext, entitlement, activity);
+protectedRouter.get('/org/info', permission('settings', 'can_view'), (req, res) => ok(res, req.org));
+protectedRouter.get('/org/modules', permission('settings', 'can_view'), asyncHandler(async (req, res) => {
   const sql = `SELECT m.*, CASE WHEN om.is_active IS NOT NULL THEN om.is_active WHEN FIELD(m.min_plan,'free','starter','growth','pro') <= FIELD(?,'free','starter','growth','pro') THEN 1 ELSE 0 END AS is_enabled FROM modules m LEFT JOIN org_modules om ON om.module_key=m.module_key AND om.org_id=? ORDER BY m.sort_order`;
   const [rows] = await masterDb.query(sql, { replacements: [req.org.plan, req.org.id] });
   return ok(res, rows);
 }));
-protectedRouter.put('/org/modules/:key/toggle', asyncHandler(async (req, res) => {
+protectedRouter.put('/org/modules/:key/toggle', permission('settings', 'can_edit'), asyncHandler(async (req, res) => {
   const { key } = req.params;
   const [mod] = await masterDb.query('SELECT * FROM modules WHERE module_key=?', { replacements: [key] });
   if (!mod.length) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Module not found' });
+  const { PLAN_LEVEL } = require('./config/constants');
+  if (PLAN_LEVEL[req.org.plan || 'free'] < PLAN_LEVEL[mod[0].min_plan || 'free']) {
+    return res.status(403).json({ success: false, error: 'MODULE_DISABLED', message: 'Upgrade your plan to enable this module' });
+  }
   const [curr] = await masterDb.query('SELECT is_active FROM org_modules WHERE org_id=? AND module_key=?', { replacements: [req.org.id, key] });
   const nextVal = curr.length ? (curr[0].is_active ? 0 : 1) : 0;
   await masterDb.query(
@@ -52,26 +91,40 @@ protectedRouter.put('/org/modules/:key/toggle', asyncHandler(async (req, res) =>
   );
   return ok(res, { module_key: key, is_enabled: Boolean(nextVal) }, 'Module status updated');
 }));
-protectedRouter.put('/org/info', asyncHandler(async (req, res) => { const keys = ['company_name','owner_name','owner_phone','gstin','address','city','state']; const set = keys.filter(k => req.body[k] !== undefined); await masterDb.query(`UPDATE organizations SET ${set.map(k => `${k}=?`).join(',')} WHERE id=?`, { replacements: [...set.map(k => req.body[k]), req.org.id] }); return ok(res, { ...req.org, ...req.body }); }));
-protectedRouter.get('/dashboard/summary', asyncHandler(async (req, res) => { const [[items]] = await req.orgDb.query('SELECT COUNT(*) total FROM item_master WHERE is_active=1'); const [[vendors]] = await req.orgDb.query('SELECT COUNT(*) total FROM vendors WHERE is_active=1'); return ok(res, { items: items.total, vendors: vendors.total, plan: req.org.plan }); }));
-protectedRouter.get('/dashboard/alerts', asyncHandler(async (req, res) => { const [rows] = await req.orgDb.query('SELECT * FROM notifications WHERE is_read=0 ORDER BY created_at DESC LIMIT 50'); return ok(res, rows); }));
-protectedRouter.get('/billing/info', asyncHandler(async (req, res) => { const [pricing] = await masterDb.query('SELECT * FROM plan_pricing WHERE is_active=1 ORDER BY plan,duration_months'); return ok(res, { plan: req.org.plan, trial_ends_at: req.org.trial_ends_at, pricing }); }));
-protectedRouter.get('/billing/invoices', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT * FROM subscriptions WHERE org_id=? ORDER BY created_at DESC', { replacements: [req.org.id] }); return ok(res, rows); }));
-protectedRouter.post('/billing/create-order', asyncHandler(async (req, res) => { const { createOrder } = require('./services/razorpay.service'); return ok(res, await createOrder({ amount: Number(req.body.amount || 0) * 100, currency: 'INR', receipt: `org_${req.org.id}` })); }));
-protectedRouter.post('/billing/verify-payment', asyncHandler(async (req, res) => {
-  const crypto = require('crypto');
-  const { verifyPayment } = require('./services/razorpay.service');
-  const verified = verifyPayment(req.body);
-  if (!verified) return res.status(400).json({ success: false, error: 'INVALID_SIGNATURE', message: 'Payment signature verification failed' });
-  if (req.body.subscription_id) {
-    await masterDb.query('UPDATE subscriptions SET status="active", starts_at=NOW(), expires_at=DATE_ADD(NOW(), INTERVAL duration_months MONTH) WHERE id=? AND org_id=?', { replacements: [req.body.subscription_id, req.org.id] });
-    await masterDb.query('UPDATE organizations SET plan=(SELECT plan FROM subscriptions WHERE id=?),plan_started_at=NOW(),plan_expires_at=DATE_ADD(NOW(), INTERVAL (SELECT duration_months FROM subscriptions WHERE id=?) MONTH),is_trial=0 WHERE id=?', { replacements: [req.body.subscription_id, req.body.subscription_id, req.org.id] });
+protectedRouter.put('/org/info', permission('settings', 'can_edit'), asyncHandler(async (req, res) => { const keys = ['company_name','owner_name','owner_phone','gstin','address','city','state']; const set = keys.filter(k => req.body[k] !== undefined); await masterDb.query(`UPDATE organizations SET ${set.map(k => `${k}=?`).join(',')} WHERE id=?`, { replacements: [...set.map(k => req.body[k]), req.org.id] }); return ok(res, { ...req.org, ...req.body }); }));
+protectedRouter.get('/dashboard/summary', permission('dashboard', 'can_view'), asyncHandler(async (req, res) => { const [[items]] = await req.orgDb.query('SELECT COUNT(*) total FROM item_master WHERE is_active=1'); const [[vendors]] = await req.orgDb.query('SELECT COUNT(*) total FROM vendors WHERE is_active=1'); return ok(res, { items: items.total, vendors: vendors.total, plan: req.org.plan }); }));
+protectedRouter.get('/dashboard/alerts', permission('dashboard', 'can_view'), asyncHandler(async (req, res) => { const [rows] = await req.orgDb.query('SELECT * FROM notifications WHERE is_read=0 ORDER BY created_at DESC LIMIT 50'); return ok(res, rows); }));
+protectedRouter.get('/billing/info', permission('finance', 'can_view'), asyncHandler(async (req, res) => { const [pricing] = await masterDb.query('SELECT * FROM plan_pricing WHERE is_active=1 ORDER BY plan,duration_months'); return ok(res, { plan: req.org.plan, trial_ends_at: req.org.trial_ends_at, pricing }); }));
+protectedRouter.get('/billing/invoices', permission('finance', 'can_view'), asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT * FROM subscriptions WHERE org_id=? ORDER BY created_at DESC', { replacements: [req.org.id] }); return ok(res, rows); }));
+protectedRouter.post('/billing/create-order', permission('finance', 'can_edit'), asyncHandler(async (req, res) => {
+  const { v4: uuid } = require('uuid');
+  const validPlans = ['starter', 'growth', 'pro'];
+  const plan = String(req.body.plan || '');
+  const durationMonths = Number(req.body.duration_months);
+  if (!validPlans.includes(plan) || ![1, 12].includes(durationMonths)) {
+    return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'A valid plan and duration_months (1 or 12) are required' });
   }
-  return ok(res, { verified: true, activated: Boolean(req.body.subscription_id) });
+  const [pricing] = await masterDb.query(
+    'SELECT amount FROM plan_pricing WHERE plan=? AND duration_months=? AND is_active=1 LIMIT 1',
+    { replacements: [plan, durationMonths] }
+  );
+  if (!pricing.length) return res.status(400).json({ success: false, error: 'PRICING_UNAVAILABLE', message: 'This plan is not currently available' });
+  const subscriptionId = uuid();
+  const amount = Number(pricing[0].amount);
+  await masterDb.query(
+    'INSERT INTO subscriptions(id,org_id,plan,duration_months,amount,status) VALUES(?,?,?,?,?,"pending")',
+    { replacements: [subscriptionId, req.org.id, plan, durationMonths, amount] }
+  );
+  const result = await createPendingOrder({ organizationId: req.org.id, subscriptionId });
+  return ok(res, { subscription_id: subscriptionId, amount, currency: 'INR', order: result.order });
 }));
-protectedRouter.patch('/notifications/:id/read', asyncHandler(async (req, res) => { await req.orgDb.query('UPDATE notifications SET is_read=1,read_at=NOW() WHERE id=? AND (user_id IS NULL OR user_id=?)', { replacements: [req.params.id, req.user.sub] }); return ok(res, { id: req.params.id, is_read: true }); }));
-protectedRouter.post('/notifications/read-all', asyncHandler(async (req, res) => { await req.orgDb.query('UPDATE notifications SET is_read=1,read_at=NOW() WHERE user_id IS NULL OR user_id=?', { replacements: [req.user.sub] }); return ok(res, null, 'Notifications marked as read'); }));
-protectedRouter.get('/inventory/stock', asyncHandler(async (req, res) => {
+protectedRouter.post('/billing/verify-payment', permission('finance', 'can_edit'), asyncHandler(async (req, res) => {
+  const result = await verifyPendingPayment(req.body);
+  return ok(res, { verified: true, ...result });
+}));
+protectedRouter.patch('/notifications/:id/read', permission('dashboard', 'can_edit'), asyncHandler(async (req, res) => { await req.orgDb.query('UPDATE notifications SET is_read=1,read_at=NOW() WHERE id=? AND (user_id IS NULL OR user_id=?)', { replacements: [req.params.id, req.user.sub] }); return ok(res, { id: req.params.id, is_read: true }); }));
+protectedRouter.post('/notifications/read-all', permission('dashboard', 'can_edit'), asyncHandler(async (req, res) => { await req.orgDb.query('UPDATE notifications SET is_read=1,read_at=NOW() WHERE user_id IS NULL OR user_id=?', { replacements: [req.user.sub] }); return ok(res, null, 'Notifications marked as read'); }));
+protectedRouter.get('/inventory/stock', permission('inventory', 'can_view'), asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page || 1));
   const limit = Math.min(100, Number(req.query.limit || 20));
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
@@ -87,12 +140,12 @@ protectedRouter.get('/inventory/stock', asyncHandler(async (req, res) => {
     ORDER BY ss.last_updated DESC LIMIT ? OFFSET ?`, { replacements });
   return ok(res, rows);
 }));
-protectedRouter.post('/inventory/stock/adjust', asyncHandler(async (req, res) => ok(res, await postStockAdjustment(req.orgDb, req.body, req.user.sub), 'Stock posted')));
-protectedRouter.post('/sales/invoices/:id/payments', asyncHandler(async (req, res) => ok(res, await recordInvoicePayment(req.orgDb, req.params.id, req.body.amount, req.body, req.user.sub), 'Payment recorded')));
-protectedRouter.post('/finance/gst/calculate', asyncHandler(async (req, res) => ok(res, calculateGST(req.body.items, req.org.state, req.body.customer_state || req.body.customerState))));
-protectedRouter.post('/hr/payroll/calculate', asyncHandler(async (req, res) => { if (!req.body.employee) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'employee is required' }); return ok(res, calculatePayroll(req.body.employee, req.body.attendance, req.body.deductions)); }));
-protectedRouter.post('/production/mrp/calculate', asyncHandler(async (req, res) => ok(res, { planned_quantity: calculateMRP(req.body.demand, req.body.on_hand, req.body.scheduled, req.body.safety_stock) })));
-protectedRouter.post('/production/bom/:id/components', asyncHandler(async (req, res) => {
+protectedRouter.post('/inventory/stock/adjust', permission('inventory', 'can_edit'), asyncHandler(async (req, res) => ok(res, await postStockAdjustment(req.orgDb, req.body, req.user.sub), 'Stock posted')));
+protectedRouter.post('/sales/invoices/:id/payments', permission('sales', 'can_edit'), asyncHandler(async (req, res) => ok(res, await recordInvoicePayment(req.orgDb, req.params.id, req.body.amount, { ...req.body, idempotency_key: req.get('Idempotency-Key') }, req.user.sub), 'Payment recorded')));
+protectedRouter.post('/finance/gst/calculate', permission('gst', 'can_view'), asyncHandler(async (req, res) => ok(res, operationalDomains.calculateGSTAuthoritative(req.body.items, req.org.state, req.body.customer_state || req.body.customerState))));
+protectedRouter.post('/hr/payroll/calculate', permission('hr', 'can_view'), asyncHandler(async (req, res) => { if (!req.body.employee) return res.status(400).json({ success: false, error: 'VALIDATION_ERROR', message: 'employee is required' }); return ok(res, calculatePayroll(req.body.employee, req.body.attendance, req.body.deductions)); }));
+protectedRouter.post('/production/mrp/calculate', permission('production', 'can_view'), asyncHandler(async (req, res) => ok(res, { planned_quantity: calculateMRP(req.body.demand, req.body.on_hand, req.body.scheduled, req.body.safety_stock) })));
+protectedRouter.post('/production/bom/:id/components', permission('production', 'can_edit'), asyncHandler(async (req, res) => {
   const tx = await req.orgDb.transaction();
   try {
     await req.orgDb.query('DELETE FROM bom_components WHERE bom_id=?', { replacements: [req.params.id], transaction: tx });
@@ -103,7 +156,7 @@ protectedRouter.post('/production/bom/:id/components', asyncHandler(async (req, 
     await tx.commit(); return ok(res, { bom_id: req.params.id, component_count: (req.body.components || []).length }, 'BOM components saved');
   } catch (error) { await tx.rollback(); throw error; }
 }));
-protectedRouter.post('/sales/invoices/:id/lines', asyncHandler(async (req, res) => {
+protectedRouter.post('/sales/invoices/:id/lines', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
   const tx = await req.orgDb.transaction();
   try {
     await req.orgDb.query('DELETE FROM invoice_item_lines WHERE invoice_id=?', { replacements: [req.params.id], transaction: tx });
@@ -119,34 +172,101 @@ protectedRouter.post('/sales/invoices/:id/lines', asyncHandler(async (req, res) 
     await tx.commit(); return ok(res, { invoice_id: req.params.id, total_amount: total }, 'Invoice lines saved');
   } catch (error) { await tx.rollback(); throw error; }
 }));
-protectedRouter.get('/reports/:table/export.xlsx', asyncHandler(async (req, res) => { const allowedReports = ['activity_log','stock_ledger','invoices','payroll_runs']; if (!allowedReports.includes(req.params.table)) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Report not found' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${req.params.table} ORDER BY 1 DESC LIMIT 10000`); res.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').set('Content-Disposition', `attachment; filename="${req.params.table}.xlsx"`).send(await excel(rows, req.params.table)); }));
-protectedRouter.get('/reports/:table/export.pdf', asyncHandler(async (req, res) => { const allowedReports = ['activity_log','stock_ledger','invoices','payroll_runs']; if (!allowedReports.includes(req.params.table)) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Report not found' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${req.params.table} ORDER BY 1 DESC LIMIT 1000`); res.type('application/pdf').set('Content-Disposition', `attachment; filename="${req.params.table}.pdf"`).send(await pdf(rows, req.params.table)); }));
-protectedRouter.get('/masters/:type', asyncHandler(async (req, res) => { const map = { items: 'item_master', vendors: 'vendors', customers: 'customers', uom: 'uom_master', hsn: 'hsn_master', departments: 'departments', machines: 'machines', warehouses: 'warehouses' }; const table = map[req.params.type]; if (!table) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Unknown master' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${table} ORDER BY 1 DESC LIMIT 500`); return ok(res, rows); }));
+protectedRouter.get('/reports/:table/export.xlsx', permission('reports', 'can_export'), asyncHandler(async (req, res) => { const allowedReports = ['activity_log','stock_ledger','invoices','payroll_runs']; if (!allowedReports.includes(req.params.table)) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Report not found' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${req.params.table} ORDER BY 1 DESC LIMIT 10000`); res.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').set('Content-Disposition', `attachment; filename="${req.params.table}.xlsx"`).send(await excel(rows, req.params.table)); }));
+protectedRouter.get('/reports/:table/export.pdf', permission('reports', 'can_export'), asyncHandler(async (req, res) => { const allowedReports = ['activity_log','stock_ledger','invoices','payroll_runs']; if (!allowedReports.includes(req.params.table)) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Report not found' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${req.params.table} ORDER BY 1 DESC LIMIT 1000`); res.type('application/pdf').set('Content-Disposition', `attachment; filename="${req.params.table}.pdf"`).send(await pdf(rows, req.params.table)); }));
+protectedRouter.get('/masters/:type', permission('dashboard', 'can_view'), asyncHandler(async (req, res) => { const map = { items: 'item_master', vendors: 'vendors', customers: 'customers', uom: 'uom_master', hsn: 'hsn_master', departments: 'departments', machines: 'machines', warehouses: 'warehouses' }; const table = map[req.params.type]; if (!table) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Unknown master' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${table} ORDER BY 1 DESC LIMIT 500`); return ok(res, rows); }));
 app.use('/api/v1', protectedRouter);
 app.use('/api/v1', workflowRoutes);
-app.use('/api/v1/forecasting', forecastingRoutes);
-app.use('/api/v1/reports', smartReportsRoutes);
+app.use('/api/v1/forecasting', auth, orgContext, entitlement, forecastingRoutes);
+app.use('/api/v1/reports', auth, orgContext, entitlement, smartReportsRoutes);
+// Inventory and purchasing foundations use explicit handlers for tenant-safe filtering,
+// validated workflow transitions, and transactional GRN posting.
+app.use('/api/v1', inventoryPurchaseRoutes);
+// Quality, HR, payroll, finance, GST and analytics foundations.
+app.use('/api/v1', nextDomainsRoutes);
+app.use('/api/v1', operationalDomainsRoutes);
+// Batch 2 transactional Sales/Dispatch and Production workflows.
+app.use('/api/v1/sales', salesProductionSalesRoutes);
+// Customer APIs retain the existing top-level /customers convention.
+app.use('/api/v1', salesProductionSalesRoutes);
+app.use('/api/v1/production', salesProductionProductionRoutes);
+app.use('/api/v1', zeroGapClosureRoutes);
 const adminRouter = express.Router();
 adminRouter.use(auth, requireAdmin);
 adminRouter.get('/dashboard', asyncHandler(async (req, res) => { const [[organizations]] = await masterDb.query('SELECT COUNT(*) total FROM organizations'); return ok(res, { organizations: organizations.total }); }));
-adminRouter.get('/organizations', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT id,slug,company_name,owner_email,owner_phone,plan,is_active,is_suspended,created_at FROM organizations ORDER BY created_at DESC'); return ok(res, rows); }));
+adminRouter.get('/errors', asyncHandler(async (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+  const [rows] = await masterDb.query('SELECT * FROM api_error_logs ORDER BY created_at DESC LIMIT ?', { replacements: [limit] });
+  return ok(res, rows);
+}));
+adminRouter.get('/organizations', asyncHandler(async (req, res) => {
+  const [rows] = await masterDb.query(`
+    SELECT o.id,o.slug,o.company_name,o.owner_email,o.owner_phone,o.plan,o.status,o.is_active,o.is_suspended,
+           d.hostname,d.subdomain,o.created_at
+    FROM organizations o
+    LEFT JOIN organization_domains d ON d.organization_id=o.id AND d.is_primary=1
+    ORDER BY o.created_at DESC
+  `);
+  return ok(res, rows);
+}));
+adminRouter.get('/domains', asyncHandler(async (req, res) => {
+  const [rows] = await masterDb.query(`
+    SELECT d.*,o.slug,o.company_name,o.status
+    FROM organization_domains d INNER JOIN organizations o ON o.id=d.organization_id
+    ORDER BY d.created_at DESC
+  `);
+  return ok(res, rows);
+}));
 adminRouter.post('/organizations', asyncHandler(async (req, res) => {
   const { company_name, owner_name, owner_email, owner_phone, slug, plan, password } = req.body;
   if (!company_name || !owner_email || !slug || !password) return fail(res, 400, 'VALIDATION_ERROR', 'company_name, owner_email, slug, password required');
   const validPlans = ['free','starter','growth','pro'];
   const chosenPlan = validPlans.includes(plan) ? plan : 'free';
-  const { hashPassword } = require('./middleware/auth');
-  const bcrypt = require('bcryptjs');
-  const orgId = uuid();
-  const hashedPw = await bcrypt.hash(password, 10);
-  await masterDb.query('INSERT INTO organizations(id,slug,company_name,owner_name,owner_email,owner_phone,plan,is_active,created_at) VALUES(?,?,?,?,?,?,?,1,NOW())', { replacements: [orgId, slug, company_name, owner_name||company_name, owner_email, owner_phone||'', chosenPlan] });
-  const dbName = 'erp_org_' + slug.replace(/-/g,'_');
-  const orgDb = require('./config/orgDb');
-  const db = await orgDb(slug);
-  await db.query(`INSERT INTO users(id,name,email,password_hash,role,is_active) VALUES(?,?,?,?,'admin',1)`, { replacements: [uuid(), owner_name||company_name, owner_email, hashedPw] });
-  return ok(res, { id: orgId, slug, company_name, plan: chosenPlan }, 'Organization created');
+  const result = await provisionOrganization({ company_name, owner_name, owner_email, owner_phone, slug, password, plan: chosenPlan });
+  await masterDb.query('UPDATE organizations SET plan=?, is_trial=? WHERE id=?', { replacements: [chosenPlan, chosenPlan === 'free' ? 1 : 0, result.org.id] });
+  return ok(res, { ...result.org, plan: chosenPlan }, 'Organization created');
 }));
-adminRouter.get('/modules', asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT * FROM modules ORDER BY sort_order'); return ok(res, rows); }));
+adminRouter.get('/modules', asyncHandler(async (req, res) => {
+  const [rows] = await masterDb.query(`
+    SELECT m.*,c.description,c.icon,c.category,c.is_purchasable,c.is_active AS catalog_active,c.display_order
+    FROM modules m LEFT JOIN module_catalog c ON c.module_key=m.module_key ORDER BY COALESCE(c.display_order,m.sort_order)
+  `);
+  return ok(res, rows);
+}));
+adminRouter.get('/modules/:key/features', asyncHandler(async (req, res) => {
+  const [rows] = await masterDb.query('SELECT * FROM module_features WHERE module_key=? ORDER BY display_order,feature_name', { replacements: [req.params.key] });
+  return ok(res, rows);
+}));
+adminRouter.post('/modules/:key/features', asyncHandler(async (req, res) => {
+  if (!req.body.feature_key || !req.body.feature_name) return fail(res, 400, 'VALIDATION_ERROR', 'feature_key and feature_name are required');
+  await masterDb.query('INSERT INTO module_features(id,module_key,feature_key,feature_name,description,display_order) VALUES(?,?,?,?,?,?)', {
+    replacements: [uuid(), req.params.key, req.body.feature_key, req.body.feature_name, req.body.description || null, Number(req.body.display_order || 0)]
+  });
+  return created(res, { module_key: req.params.key, feature_key: req.body.feature_key }, 'Feature created');
+}));
+adminRouter.put('/modules/:key/features/:featureId', asyncHandler(async (req, res) => {
+  const fields = ['feature_name','description','is_active','display_order'].filter(key => req.body[key] !== undefined);
+  if (!fields.length) return fail(res, 400, 'VALIDATION_ERROR', 'No fields to update');
+  await masterDb.query(`UPDATE module_features SET ${fields.map(key => `${key}=?`).join(',')} WHERE id=? AND module_key=?`, {
+    replacements: [...fields.map(key => req.body[key]), req.params.featureId, req.params.key]
+  });
+  return ok(res, { id: req.params.featureId }, 'Feature updated');
+}));
+adminRouter.get('/pricing', asyncHandler(async (req, res) => {
+  const [plans] = await masterDb.query('SELECT * FROM plan_pricing ORDER BY plan,duration_months');
+  const [modules] = await masterDb.query('SELECT * FROM module_pricing ORDER BY module_key,duration_months');
+  return ok(res, { plans, modules });
+}));
+adminRouter.put('/pricing/plans/:id', asyncHandler(async (req, res) => {
+  if (req.body.amount === undefined || Number(req.body.amount) < 0) return fail(res, 400, 'VALIDATION_ERROR', 'A non-negative amount is required');
+  await masterDb.query('UPDATE plan_pricing SET amount=?,is_active=COALESCE(?,is_active) WHERE id=?', { replacements: [Number(req.body.amount), req.body.is_active, req.params.id] });
+  return ok(res, { id: req.params.id, amount: Number(req.body.amount) }, 'Plan pricing updated');
+}));
+adminRouter.put('/pricing/modules/:id', asyncHandler(async (req, res) => {
+  if (req.body.amount === undefined || Number(req.body.amount) < 0) return fail(res, 400, 'VALIDATION_ERROR', 'A non-negative amount is required');
+  await masterDb.query('UPDATE module_pricing SET amount=?,is_active=COALESCE(?,is_active) WHERE id=?', { replacements: [Number(req.body.amount), req.body.is_active, req.params.id] });
+  return ok(res, { id: req.params.id, amount: Number(req.body.amount) }, 'Module pricing updated');
+}));
 adminRouter.post('/organizations/:id/suspend', asyncHandler(async (req, res) => { await masterDb.query('UPDATE organizations SET is_suspended=1,suspension_reason=? WHERE id=?', { replacements: [req.body.reason || 'Suspended by administrator', req.params.id] }); return ok(res, { id: req.params.id, is_suspended: true }); }));
 adminRouter.post('/organizations/:id/activate', asyncHandler(async (req, res) => { await masterDb.query('UPDATE organizations SET is_suspended=0,is_active=1 WHERE id=?', { replacements: [req.params.id] }); return ok(res, { id: req.params.id, is_suspended: false, is_active: true }); }));
 adminRouter.get('/organizations/:id/modules', asyncHandler(async (req, res) => {
@@ -182,7 +302,7 @@ app.use('/api/v1/admin', adminRouter);
 // POST: hash password before insert
 // PUT: allow password change with hashing
 const userRouter = express.Router();
-userRouter.use(auth, orgContext, activity);
+userRouter.use(auth, orgContext, entitlement, activity);
 const { permission: perm } = (() => { try { return { permission: require('./middleware/permission') }; } catch { return { permission: () => (req, res, next) => next() }; } })();
 userRouter.get('/', perm('settings', 'can_view'), asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page || 1));
@@ -247,6 +367,6 @@ mounts.push(
 );
 for (const [route, table, module] of mounts) app.use(`/api/v1/${route}`, crud(table, module, { actions: { send: 'put', confirm: 'put', approve: 'put', reject: 'put', cancel: 'put', close: 'put', release: 'put', start: 'put', complete: 'put', post: 'put' } }));
 const upload = multer({ dest: 'uploads/' });
-app.post('/api/v1/settings/company/logo', auth, orgContext, upload.single('logo'), (req, res) => ok(res, { filename: req.file?.filename }, 'Logo uploaded'));
+app.post('/api/v1/settings/company/logo', auth, orgContext, entitlement, permission('settings', 'can_edit'), upload.single('logo'), (req, res) => ok(res, { filename: req.file?.filename }, 'Logo uploaded'));
 app.use(errorHandler);
 module.exports = app;
