@@ -35,6 +35,12 @@ jobs:
           echo "==> Checking backend"
           /opt/homebrew/bin/npm run check
 
+          echo "==> Applying master database migrations"
+          /opt/homebrew/bin/npm run migrate:master
+
+          echo "==> Applying active organization database migrations"
+          /opt/homebrew/bin/npm run migrate:org -- --all
+
           echo "==> Restarting ERP backend"
           /opt/homebrew/bin/pm2 restart erp-backend --update-env
 

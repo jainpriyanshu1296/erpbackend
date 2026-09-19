@@ -3,6 +3,40 @@ const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql2/promise');
 
+function splitStatements(sql) {
+  return sql
+    .split(';')
+    .map(statement => statement.trim())
+    .filter(Boolean);
+}
+
+async function executeMigrationSql(conn, dbName, sql) {
+  for (const statement of splitStatements(sql)) {
+    if (!/^ALTER\s+TABLE\s+/i.test(statement) || !/ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i.test(statement)) {
+      await conn.query(statement);
+      continue;
+    }
+
+    const match = statement.match(/^ALTER\s+TABLE\s+([`A-Za-z0-9_.]+)\s+([\s\S]+)$/i);
+    if (!match) throw new Error(`Unsupported ALTER TABLE migration syntax: ${statement}`);
+    const table = match[1].replace(/`/g, '');
+    const additions = [...match[2].matchAll(
+      /ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+([`A-Za-z0-9_]+)\s+([\s\S]*?)(?=\s*,\s*ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+|$)/gi
+    )];
+    if (!additions.length) throw new Error(`Unsupported ALTER TABLE migration syntax: ${statement}`);
+
+    for (const [, rawColumn, definition] of additions) {
+      const column = rawColumn.replace(/`/g, '');
+      const [columns] = await conn.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_name=? LIMIT 1`,
+        [dbName, table, column]
+      );
+      if (columns.length) continue;
+      await conn.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition.trim()}`);
+    }
+  }
+}
+
 async function applyMigrationsToDb(conn, dbName, kind) {
   console.log(`\n--- Migrating ${kind} database: ${dbName} ---`);
   if (kind === 'master') {
@@ -48,7 +82,7 @@ async function applyMigrationsToDb(conn, dbName, kind) {
       console.log(`[APPLYING] ${file}...`);
       const sql = fs.readFileSync(path.join(dir, file), 'utf8');
       try {
-        await conn.query(sql);
+        await executeMigrationSql(conn, dbName, sql);
         await conn.query('INSERT INTO _migrations (migration_name) VALUES (?)', [file]);
       } catch (error) {
         throw new Error(`Migration ${file} failed for ${dbName}: ${error.message}`);
