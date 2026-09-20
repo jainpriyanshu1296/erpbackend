@@ -7,7 +7,7 @@ function splitStatements(sql) {
   return sql
     .split(';')
     .map(statement => statement
-      .replace(/^(?:\s*--[^\n]*(?:\n|$)|\s*\/\*[\s\S]*?\*\/)*/g, '')
+      .replace(/^\s*(?:(?:--[^\r\n]*(?:\r?\n|$))|(?:\/\*[\s\S]*?\*\/\s*))+/g, '')
       .trim())
     .filter(Boolean);
 }
