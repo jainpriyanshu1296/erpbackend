@@ -6,7 +6,9 @@ const mysql = require('mysql2/promise');
 function splitStatements(sql) {
   return sql
     .split(';')
-    .map(statement => statement.trim())
+    .map(statement => statement
+      .replace(/^(?:\s*--[^\n]*(?:\n|$)|\s*\/\*[\s\S]*?\*\/)*/g, '')
+      .trim())
     .filter(Boolean);
 }
 
