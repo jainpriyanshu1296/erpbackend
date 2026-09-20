@@ -1,5 +1,3 @@
-USE `erp_master`;
-
 ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS must_change_password TINYINT(1) NOT NULL DEFAULT 0;
 ALTER TABLE subscriptions
   ADD COLUMN IF NOT EXISTS activated_at DATETIME NULL,

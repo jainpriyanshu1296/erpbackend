@@ -109,11 +109,11 @@ async function run() {
 
   try {
     if (kind === 'master') {
-      const masterDb = process.env.MASTER_DB_NAME || 'erp_master';
+      const masterDb = process.env.MASTER_DB_NAME || 'masterERP';
       await applyMigrationsToDb(conn, masterDb, 'master');
     } else if (kind === 'org') {
       if (target === '--all' || args.includes('--all')) {
-        const masterDb = process.env.MASTER_DB_NAME || 'erp_master';
+        const masterDb = process.env.MASTER_DB_NAME || 'masterERP';
         await conn.query(`USE \`${masterDb.replace(/`/g, '')}\``);
         const [orgs] = await conn.query('SELECT db_name, company_name FROM organizations WHERE is_active=1');
         console.log(`Found ${orgs.length} active organizations for migration.`);

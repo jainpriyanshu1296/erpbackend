@@ -20,6 +20,7 @@ jobs:
           set -e
 
           export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          export MASTER_DB_NAME="masterERP"
 
           cd /Users/priyanshujain/erpbackend
 

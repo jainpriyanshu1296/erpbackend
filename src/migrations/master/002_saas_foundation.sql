@@ -1,5 +1,3 @@
-USE `erp_master`;
-
 ALTER TABLE organizations
   ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'active' AFTER plan,
   ADD INDEX idx_organizations_status (status);

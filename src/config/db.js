@@ -1,7 +1,7 @@
 const { Sequelize } = require('sequelize');
 require('dotenv').config();
 
-const masterDb = new Sequelize(process.env.MASTER_DB_NAME || 'erp_master', process.env.MASTER_DB_USER || 'root', process.env.MASTER_DB_PASS || '', {
+const masterDb = new Sequelize(process.env.MASTER_DB_NAME || 'masterERP', process.env.MASTER_DB_USER || 'root', process.env.MASTER_DB_PASS || '', {
   host: process.env.MASTER_DB_HOST || 'localhost',
   port: Number(process.env.MASTER_DB_PORT || 3306),
   dialect: 'mysql',

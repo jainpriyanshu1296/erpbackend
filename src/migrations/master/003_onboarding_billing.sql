@@ -1,5 +1,3 @@
-USE `erp_master`;
-
 ALTER TABLE subscriptions
   ADD COLUMN provider_order_id VARCHAR(100) NULL,
   ADD COLUMN provider_payment_id VARCHAR(100) NULL,

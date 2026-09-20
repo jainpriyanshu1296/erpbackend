@@ -9,6 +9,7 @@
     "check": "node --check src/server.js && node --check src/app.js",
     "test": "node --test test/**/*.test.js",
     "bootstrap:admin": "node src/commands/bootstrap-admin.js",
+    "seed:demo": "node src/commands/seed-demo.js",
     "migrate:master": "node src/migrations/run.js master",
     "migrate:org": "node src/migrations/run.js org"
   },

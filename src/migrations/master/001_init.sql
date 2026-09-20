@@ -1,5 +1,3 @@
-CREATE DATABASE IF NOT EXISTS `erp_master`;
-USE `erp_master`;
 CREATE TABLE IF NOT EXISTS organizations (
  id VARCHAR(36) PRIMARY KEY, slug VARCHAR(50) UNIQUE NOT NULL, db_name VARCHAR(100) UNIQUE NOT NULL,
  company_name VARCHAR(200) NOT NULL, owner_name VARCHAR(200), owner_email VARCHAR(200) NOT NULL,
