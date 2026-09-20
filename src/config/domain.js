@@ -6,8 +6,18 @@ function requestHost(req) {
   return String(value).split(',')[0].trim().split(':')[0].toLowerCase();
 }
 
+function originHost(req) {
+  try {
+    const origin = req.get('origin');
+    if (!origin) return '';
+    return new URL(origin).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
 function tenantSubdomain(req) {
-  const host = requestHost(req);
+  const host = originHost(req) || requestHost(req);
   if (!host || host === baseDomain || host === `www.${baseDomain}`) return null;
   if (!host.endsWith(`.${baseDomain}`)) return null;
   const prefix = host.slice(0, -(`.${baseDomain}`).length);

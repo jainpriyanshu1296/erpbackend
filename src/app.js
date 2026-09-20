@@ -193,7 +193,21 @@ app.use('/api/v1/production', salesProductionProductionRoutes);
 app.use('/api/v1', zeroGapClosureRoutes);
 const adminRouter = express.Router();
 adminRouter.use(auth, requireAdmin);
-adminRouter.get('/dashboard', asyncHandler(async (req, res) => { const [[organizations]] = await masterDb.query('SELECT COUNT(*) total FROM organizations'); return ok(res, { organizations: organizations.total }); }));
+adminRouter.get('/dashboard', asyncHandler(async (req, res) => {
+  const [rows] = await masterDb.query(`
+    SELECT
+      COUNT(*) AS organizations,
+      SUM(CASE WHEN is_active=1 AND is_suspended=0 THEN 1 ELSE 0 END) AS active_organizations,
+      SUM(CASE WHEN is_suspended=1 THEN 1 ELSE 0 END) AS suspended_organizations
+    FROM organizations
+  `);
+  const metrics = rows[0] || {};
+  return ok(res, {
+    organizations: Number(metrics.organizations || 0),
+    active_organizations: Number(metrics.active_organizations || 0),
+    suspended_organizations: Number(metrics.suspended_organizations || 0)
+  });
+}));
 adminRouter.get('/errors', asyncHandler(async (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
   const [rows] = await masterDb.query('SELECT * FROM api_error_logs ORDER BY created_at DESC LIMIT ?', { replacements: [limit] });
