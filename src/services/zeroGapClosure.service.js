@@ -275,7 +275,7 @@ async function processImport(db, id, userId) {
       assert(columns.length > 0, `Row ${index + 1} has no supported fields`);
       const values = columns.map(column => row[column]);
       await db.query(`INSERT INTO ${jobs[0].entity_type} (id,${columns.join(',')}) VALUES (?,${columns.map(() => '?').join(',')})`, { replacements: [uuid(), ...values], transaction: tx });
-      await db.query('INSERT INTO import_rows(id,import_job_id,row_number,payload,status) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE payload=VALUES(payload),status="processed",error_message=NULL', { replacements: [uuid(), id, index + 1, JSON.stringify(payload[index]), 'processed'], transaction: tx });
+      await db.query('INSERT INTO import_rows(id,import_job_id,row_no,payload,status) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE payload=VALUES(payload),status="processed",error_message=NULL', { replacements: [uuid(), id, index + 1, JSON.stringify(payload[index]), 'processed'], transaction: tx });
     }
     await db.query('UPDATE import_jobs SET status="completed",processed_rows=?,error_json=NULL WHERE id=?', { replacements: [payload.length, id], transaction: tx });
     await audit(db, userId, 'inventory', 'import.completed', 'import_job', id, { rows: payload.length }, tx);

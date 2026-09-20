@@ -28,11 +28,11 @@ CREATE TABLE IF NOT EXISTS stock_effects (
 CREATE TABLE IF NOT EXISTS import_rows (
   id VARCHAR(36) PRIMARY KEY,
   import_job_id VARCHAR(36) NOT NULL,
-  row_number INT NOT NULL,
+  row_no INT NOT NULL,
   payload JSON NOT NULL,
   status VARCHAR(30) NOT NULL DEFAULT 'queued',
   error_message VARCHAR(500),
-  UNIQUE KEY uq_import_row(import_job_id,row_number)
+  UNIQUE KEY uq_import_row(import_job_id,row_no)
 );
 
 ALTER TABLE physical_counts ADD COLUMN IF NOT EXISTS legacy_stock_count_id VARCHAR(36);
