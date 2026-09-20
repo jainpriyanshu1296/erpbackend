@@ -10,15 +10,24 @@ const DEMO_SLUG = 'erp';
 const DEMO_DB = 'org_erp';
 const DEMO_PLAN = 'pro';
 
-function required(name) {
-  const value = String(process.env[name] || '');
+function argument(name) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? String(process.argv[index + 1] || '') : '';
+}
+
+function required(name, flag) {
+  const value = argument(flag) || String(process.env[name] || '');
   if (!value || value.length < 12) throw new Error(`${name} is required and must be at least 12 characters`);
   return value;
 }
 
 async function main() {
-  const tenantPassword = required('DEMO_ORG_PASSWORD');
-  const superAdminPassword = required('DEMO_SUPERADMIN_PASSWORD');
+  if (process.argv.includes('--help')) {
+    console.log('Usage: npm run seed:demo -- --org-password <12+ chars> --admin-password <12+ chars>');
+    return;
+  }
+  const tenantPassword = required('DEMO_ORG_PASSWORD', '--org-password');
+  const superAdminPassword = required('DEMO_SUPERADMIN_PASSWORD', '--admin-password');
   const tenantHash = await bcrypt.hash(tenantPassword, 12);
   const superAdminHash = await bcrypt.hash(superAdminPassword, 12);
   const hostname = `${DEMO_SLUG}.${String(process.env.PLATFORM_DOMAIN || 'daanoday.com').toLowerCase()}`;
