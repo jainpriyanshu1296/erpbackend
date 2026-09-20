@@ -15,6 +15,20 @@ function splitStatements(sql) {
 
 async function executeMigrationSql(conn, dbName, sql) {
   for (const statement of splitStatements(sql)) {
+    const indexMatch = statement.match(/^CREATE\s+(UNIQUE\s+)?INDEX\s+([`A-Za-z0-9_]+)\s+ON\s+([`A-Za-z0-9_.]+)\s*\(([^)]+)\)$/i);
+    if (indexMatch) {
+      const [, unique, rawIndex, rawTable, columns] = indexMatch;
+      const indexName = rawIndex.replace(/`/g, '');
+      const table = rawTable.replace(/`/g, '');
+      const [indexes] = await conn.query(
+        'SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name=? AND index_name=? LIMIT 1',
+        [dbName, table, indexName]
+      );
+      if (!indexes.length) {
+        await conn.query(`CREATE ${unique || ''}INDEX \`${indexName}\` ON \`${table}\` (${columns})`);
+      }
+      continue;
+    }
     if (!/^ALTER\s+TABLE\s+/i.test(statement) || !/ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i.test(statement)) {
       await conn.query(statement);
       continue;

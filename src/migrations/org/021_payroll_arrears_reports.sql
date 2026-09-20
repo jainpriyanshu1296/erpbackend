@@ -31,6 +31,6 @@ CREATE TABLE IF NOT EXISTS hr_employment_types (
 );
 CREATE TABLE IF NOT EXISTS hr_document_types (
   id VARCHAR(36) PRIMARY KEY, code VARCHAR(60) NOT NULL, name VARCHAR(150) NOT NULL,
-  sensitive TINYINT(1) NOT NULL DEFAULT 0, is_active TINYINT(1) NOT NULL DEFAULT 1,
+  document_sensitive TINYINT(1) NOT NULL DEFAULT 0, is_active TINYINT(1) NOT NULL DEFAULT 1,
   UNIQUE KEY uq_hr_document_type_code(code)
 );

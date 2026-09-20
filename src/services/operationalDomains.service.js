@@ -544,7 +544,7 @@ async function createHrMaster(req, kind, body = {}) {
   const definitions = {
     designation: ['hr_designations', 'code,name,description,is_active'],
     employment_type: ['hr_employment_types', 'code,name,is_active'],
-    document_type: ['hr_document_types', 'code,name,sensitive,is_active']
+    document_type: ['hr_document_types', 'code,name,document_sensitive,is_active']
   };
   const def = definitions[kind]; if (!def || !body.code || !body.name) throw error('code and name are required');
   const id = uuid();
