@@ -16,12 +16,13 @@ CREATE TABLE IF NOT EXISTS purchase_requisition_items (
 );
 
 -- Add missing columns to purchase_requisitions
-ALTER TABLE purchase_requisitions ADD COLUMN IF NOT EXISTS department VARCHAR(100) NULL;
-ALTER TABLE purchase_requisitions ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL;
-ALTER TABLE purchase_requisitions ADD COLUMN IF NOT EXISTS required_date DATE NULL;
-ALTER TABLE purchase_requisitions ADD COLUMN IF NOT EXISTS priority VARCHAR(30) DEFAULT 'normal';
-ALTER TABLE purchase_requisitions ADD COLUMN IF NOT EXISTS reason TEXT NULL;
-ALTER TABLE purchase_requisitions ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(500) NULL;
+ALTER TABLE purchase_requisitions
+  ADD COLUMN IF NOT EXISTS department VARCHAR(100) NULL,
+  ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL,
+  ADD COLUMN IF NOT EXISTS required_date DATE NULL,
+  ADD COLUMN IF NOT EXISTS priority VARCHAR(30) DEFAULT 'normal',
+  ADD COLUMN IF NOT EXISTS reason TEXT NULL,
+  ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(500) NULL;
 
 -- ============ PURCHASE ORDER ITEM TABLES ============
 CREATE TABLE IF NOT EXISTS purchase_order_items (
@@ -38,10 +39,11 @@ CREATE TABLE IF NOT EXISTS purchase_order_items (
 );
 
 -- Add missing columns to purchase_orders
-ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS delivery_date DATE NULL;
-ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL;
-ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS payment_terms INT DEFAULT 30;
-ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS notes TEXT NULL;
+ALTER TABLE purchase_orders
+  ADD COLUMN IF NOT EXISTS delivery_date DATE NULL,
+  ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL,
+  ADD COLUMN IF NOT EXISTS payment_terms INT DEFAULT 30,
+  ADD COLUMN IF NOT EXISTS notes TEXT NULL;
 
 -- ============ GRN ITEM TABLES ============
 CREATE TABLE IF NOT EXISTS grn_items (
@@ -56,8 +58,9 @@ CREATE TABLE IF NOT EXISTS grn_items (
 );
 
 -- Add missing columns to grn
-ALTER TABLE grn ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL;
-ALTER TABLE grn ADD COLUMN IF NOT EXISTS notes TEXT NULL;
+ALTER TABLE grn
+  ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL,
+  ADD COLUMN IF NOT EXISTS notes TEXT NULL;
 
 -- ============ PURCHASE RETURN TABLES ============
 CREATE TABLE IF NOT EXISTS purchase_returns (
@@ -137,9 +140,10 @@ CREATE TABLE IF NOT EXISTS quotation_items (
 );
 
 -- Add missing columns to quotations
-ALTER TABLE quotations ADD COLUMN IF NOT EXISTS valid_until DATE NULL;
-ALTER TABLE quotations ADD COLUMN IF NOT EXISTS notes TEXT NULL;
-ALTER TABLE quotations ADD COLUMN IF NOT EXISTS created_by VARCHAR(36) NULL;
+ALTER TABLE quotations
+  ADD COLUMN IF NOT EXISTS valid_until DATE NULL,
+  ADD COLUMN IF NOT EXISTS notes TEXT NULL,
+  ADD COLUMN IF NOT EXISTS created_by VARCHAR(36) NULL;
 
 -- ============ SALES ORDER ITEM TABLES ============
 CREATE TABLE IF NOT EXISTS sales_order_items (
@@ -157,9 +161,10 @@ CREATE TABLE IF NOT EXISTS sales_order_items (
 );
 
 -- Add missing columns to sales_orders
-ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS delivery_date DATE NULL;
-ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS notes TEXT NULL;
-ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS created_by VARCHAR(36) NULL;
+ALTER TABLE sales_orders
+  ADD COLUMN IF NOT EXISTS delivery_date DATE NULL,
+  ADD COLUMN IF NOT EXISTS notes TEXT NULL,
+  ADD COLUMN IF NOT EXISTS created_by VARCHAR(36) NULL;
 
 -- ============ DELIVERY CHALLAN ITEM TABLES ============
 CREATE TABLE IF NOT EXISTS delivery_challan_items (
@@ -173,10 +178,11 @@ CREATE TABLE IF NOT EXISTS delivery_challan_items (
 );
 
 -- Add missing columns to delivery_challans
-ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS so_id VARCHAR(36) NULL;
-ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL;
-ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS notes TEXT NULL;
-ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS created_by VARCHAR(36) NULL;
+ALTER TABLE delivery_challans
+  ADD COLUMN IF NOT EXISTS so_id VARCHAR(36) NULL,
+  ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL,
+  ADD COLUMN IF NOT EXISTS notes TEXT NULL,
+  ADD COLUMN IF NOT EXISTS created_by VARCHAR(36) NULL;
 
 -- ============ SALES INVOICE ITEM TABLES ============
 CREATE TABLE IF NOT EXISTS invoice_items (
@@ -198,10 +204,11 @@ CREATE TABLE IF NOT EXISTS invoice_items (
 );
 
 -- Add missing columns to invoices
-ALTER TABLE invoices ADD COLUMN IF NOT EXISTS due_date DATE NULL;
-ALTER TABLE invoices ADD COLUMN IF NOT EXISTS so_id VARCHAR(36) NULL;
-ALTER TABLE invoices ADD COLUMN IF NOT EXISTS notes TEXT NULL;
-ALTER TABLE invoices ADD COLUMN IF NOT EXISTS created_by VARCHAR(36) NULL;
+ALTER TABLE invoices
+  ADD COLUMN IF NOT EXISTS due_date DATE NULL,
+  ADD COLUMN IF NOT EXISTS so_id VARCHAR(36) NULL,
+  ADD COLUMN IF NOT EXISTS notes TEXT NULL,
+  ADD COLUMN IF NOT EXISTS created_by VARCHAR(36) NULL;
 
 -- ============ SALES RETURN TABLES ============
 CREATE TABLE IF NOT EXISTS sales_returns (
@@ -230,9 +237,10 @@ CREATE TABLE IF NOT EXISTS sales_return_items (
 );
 
 -- Add missing columns to sales_returns
-ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS so_id VARCHAR(36) NULL;
-ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL;
-ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS reason TEXT NULL;
+ALTER TABLE sales_returns
+  ADD COLUMN IF NOT EXISTS so_id VARCHAR(36) NULL,
+  ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL,
+  ADD COLUMN IF NOT EXISTS reason TEXT NULL;
 
 -- ============ INVOICE PAYMENT TABLES ============
 CREATE TABLE IF NOT EXISTS invoice_payments (
@@ -262,13 +270,15 @@ CREATE TABLE IF NOT EXISTS vendor_payments (
 );
 
 -- Add missing columns to vendors
-ALTER TABLE vendors ADD COLUMN IF NOT EXISTS bank_account VARCHAR(100) NULL;
-ALTER TABLE vendors ADD COLUMN IF NOT EXISTS bank_ifsc VARCHAR(20) NULL;
-ALTER TABLE vendors ADD COLUMN IF NOT EXISTS credit_limit DECIMAL(14,2) DEFAULT 0;
+ALTER TABLE vendors
+  ADD COLUMN IF NOT EXISTS bank_account VARCHAR(100) NULL,
+  ADD COLUMN IF NOT EXISTS bank_ifsc VARCHAR(20) NULL,
+  ADD COLUMN IF NOT EXISTS credit_limit DECIMAL(14,2) DEFAULT 0;
 
 -- Add missing columns to customers
-ALTER TABLE customers ADD COLUMN IF NOT EXISTS credit_limit DECIMAL(14,2) DEFAULT 0;
-ALTER TABLE customers ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) DEFAULT 0;
+ALTER TABLE customers
+  ADD COLUMN IF NOT EXISTS credit_limit DECIMAL(14,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) DEFAULT 0;
 
 -- ============ INDEXES FOR PERFORMANCE ============
 CREATE INDEX IF NOT EXISTS idx_stock_ledger_item ON stock_ledger(item_id);
