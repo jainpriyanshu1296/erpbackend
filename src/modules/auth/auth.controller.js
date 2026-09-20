@@ -9,6 +9,9 @@ const jwt = require('jsonwebtoken');
 const { sendEmail } = require('../../services/email.service');
 const { tenantSubdomain } = require('../../config/domain');
 const { createPendingOrganization } = require('../../services/onboarding.service');
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
 async function issueRefresh(orgDb, user, org) {
   const token = jwt.sign({ sub: user.id, email: user.email, role: user.role, orgId: org.id, orgSlug: org.slug }, secret(), { expiresIn: '30d' });
   const hash = crypto.createHash('sha256').update(token).digest('hex');
@@ -16,7 +19,8 @@ async function issueRefresh(orgDb, user, org) {
   return token;
 }
 const login = asyncHandler(async (req, res) => {
-  const { email, password, org_slug } = req.body;
+  const { password, org_slug } = req.body;
+  const email = normalizeEmail(req.body.email);
   const subdomain = tenantSubdomain(req);
   const requestedSlug = subdomain;
   if (!requestedSlug) return fail(res, 400, 'TENANT_DOMAIN_REQUIRED', 'Open the organization subdomain to sign in');
@@ -97,7 +101,8 @@ const resetPassword = asyncHandler(async (req, res) => {
 });
 
 const adminLogin = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+  const { password } = req.body;
+  const email = normalizeEmail(req.body.email);
   if (!email || !password) return fail(res, 400, 'VALIDATION_ERROR', 'Email and password are required');
 
   const [admins] = await masterDb.query('SELECT * FROM admin_users WHERE email = ? AND is_active = 1', { replacements: [email] });
