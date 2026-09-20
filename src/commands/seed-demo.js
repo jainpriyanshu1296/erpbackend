@@ -17,13 +17,13 @@ function argument(name) {
 
 function required(name, flag) {
   const value = argument(flag) || String(process.env[name] || '');
-  if (!value || value.length < 12) throw new Error(`${name} is required and must be at least 12 characters`);
+  if (!/^\d{6}$/.test(value)) throw new Error(`${name} is required and must be exactly 6 digits`);
   return value;
 }
 
 async function main() {
   if (process.argv.includes('--help')) {
-    console.log('Usage: npm run seed:demo -- --org-password <12+ chars> --admin-password <12+ chars>');
+    console.log('Usage: npm run seed:demo -- --org-password <6 digits> --admin-password <6 digits>');
     return;
   }
   const tenantPassword = required('DEMO_ORG_PASSWORD', '--org-password');
