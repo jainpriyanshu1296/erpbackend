@@ -249,7 +249,7 @@ CREATE TABLE IF NOT EXISTS invoice_payments (
   amount DECIMAL(14,2) NOT NULL,
   method VARCHAR(30) DEFAULT 'bank',
   reference VARCHAR(100) NULL,
-  payment_date DATE DEFAULT CURRENT_DATE,
+  payment_date DATE,
   created_by VARCHAR(36) NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_invoice_payments_inv(invoice_id),
@@ -263,7 +263,7 @@ CREATE TABLE IF NOT EXISTS vendor_payments (
   amount DECIMAL(14,2) NOT NULL,
   method VARCHAR(30) DEFAULT 'bank',
   reference VARCHAR(100) NULL,
-  payment_date DATE DEFAULT CURRENT_DATE,
+  payment_date DATE,
   created_by VARCHAR(36) NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_vendor_payments_vendor(vendor_id)
