@@ -543,6 +543,28 @@ router.post('/returns/:id/post', permission('sales', 'can_edit'), asyncHandler(a
   }
 }));
 
+router.get('/invoices', permission('sales', 'can_view'), asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1)), limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+  const search = String(req.query.search || '').trim(), where = search ? ' WHERE i.invoice_number LIKE ? OR c.company_name LIKE ?' : '';
+  const values = search ? [`%${search}%`, `%${search}%`] : [];
+  const [[count]] = await req.orgDb.query(`SELECT COUNT(*) total FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id${where}`, { replacements: values });
+  const [rows] = await req.orgDb.query(`SELECT i.*,c.company_name FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id${where} ORDER BY i.created_at DESC LIMIT ? OFFSET ?`, { replacements: [...values, limit, (page-1)*limit] });
+  return ok(res, rows, 'Invoices fetched', { page, limit, total: Number(count.total || 0) });
+}));
+router.post('/invoices', permission('sales', 'can_create'), asyncHandler(async (req, res) => {
+  if (!req.body.invoice_number || !req.body.customer_id || !req.body.invoice_date) return fail(res, 400, 'VALIDATION_ERROR', 'invoice_number, customer_id and invoice_date are required');
+  const id = uuid(), total = Number(req.body.total_amount || 0); if (!Number.isFinite(total) || total < 0) return fail(res, 400, 'VALIDATION_ERROR', 'total_amount must be non-negative');
+  await req.orgDb.query('INSERT INTO invoices(id,invoice_number,customer_id,invoice_date,status,total_amount,balance_amount,sales_order_id,due_date) VALUES(?,?,?,?,?,?,?,?,?)', { replacements: [id,req.body.invoice_number,req.body.customer_id,req.body.invoice_date,'draft',total,total,req.body.sales_order_id||null,req.body.due_date||null] });
+  return created(res, { id, invoice_number:req.body.invoice_number, total_amount:total, balance_amount:total, status:'draft' });
+}));
+router.get('/invoices/:id', permission('sales', 'can_view'), asyncHandler(async (req, res) => {
+  const [[invoice]] = await req.orgDb.query('SELECT i.*,c.company_name FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id WHERE i.id=?', { replacements:[req.params.id] });
+  if (!invoice) return fail(res,404,'NOT_FOUND','Invoice not found');
+  const [items] = await req.orgDb.query('SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY id', { replacements:[req.params.id] });
+  const [payments] = await req.orgDb.query('SELECT * FROM invoice_payments WHERE invoice_id=? ORDER BY created_at DESC', { replacements:[req.params.id] });
+  return ok(res,{ ...invoice,items,payments });
+}));
+
 router.post('/delivery-challans/:id/dispatch', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
   const [challan] = await req.orgDb.query('SELECT status, warehouse_id, customer_id FROM delivery_challans WHERE id = ?', { replacements: [req.params.id] });
   if (!challan.length) return fail(res, 404, 'NOT_FOUND', 'Delivery challan not found');
