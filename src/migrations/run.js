@@ -4,11 +4,12 @@ const path = require('path');
 const mysql = require('mysql2/promise');
 
 function splitStatements(sql) {
-  return sql
+  const withoutComments = sql
+    .replace(/--[^\r\n]*(?:\r?\n|$)/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  return withoutComments
     .split(';')
-    .map(statement => statement
-      .replace(/^\s*(?:(?:--[^\r\n]*(?:\r?\n|$))|(?:\/\*[\s\S]*?\*\/\s*))+/g, '')
-      .trim())
+    .map(statement => statement.trim())
     .filter(Boolean);
 }
 
