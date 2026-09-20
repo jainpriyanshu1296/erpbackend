@@ -1,7 +1,7 @@
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const { ok, fail, created, asyncHandler } = require('../utils/response');
-const { permission } = require('../middleware/permission');
+const permission = require('../middleware/permission');
 
 const router = express.Router();
 
