@@ -8,7 +8,7 @@ const multer = require('multer');
 const rateLimiter = require('./middleware/rateLimiter');
 const { auth } = require('./middleware/auth');
 const orgContext = require('./middleware/orgContext');
-const { ok, asyncHandler } = require('./utils/response');
+const { ok, fail, created, asyncHandler } = require('./utils/response');
 const errorHandler = require('./middleware/error');
 const activity = require('./middleware/activity');
 const { postStockAdjustment, recordInvoicePayment, calculateGST, calculatePayroll, calculateMRP } = require('./services/erp.service');
@@ -24,6 +24,9 @@ const zeroGapClosureRoutes = require('./modules/zeroGapClosure.routes');
 const nextDomainsRoutes = require('./modules/nextDomains.routes');
 const operationalDomainsRoutes = require('./modules/operationalDomains.routes');
 const operationalDomains = require('./services/operationalDomains.service');
+const purchaseRoutes = require('./modules/purchase.routes');
+const inventoryRoutes = require('./modules/inventory.routes');
+const salesRoutes = require('./modules/sales.routes');
 const publicRoutes = require('./modules/public/public.routes');
 const onboardingRoutes = require('./modules/public/onboarding.routes');
 const { processPaymentWebhook, createPendingOrder, verifyPendingPayment, provisionOrganization } = require('./services/onboarding.service');
@@ -92,7 +95,6 @@ protectedRouter.put('/org/modules/:key/toggle', permission('settings', 'can_edit
   return ok(res, { module_key: key, is_enabled: Boolean(nextVal) }, 'Module status updated');
 }));
 protectedRouter.put('/org/info', permission('settings', 'can_edit'), asyncHandler(async (req, res) => { const keys = ['company_name','owner_name','owner_phone','gstin','address','city','state']; const set = keys.filter(k => req.body[k] !== undefined); await masterDb.query(`UPDATE organizations SET ${set.map(k => `${k}=?`).join(',')} WHERE id=?`, { replacements: [...set.map(k => req.body[k]), req.org.id] }); return ok(res, { ...req.org, ...req.body }); }));
-protectedRouter.get('/dashboard/summary', permission('dashboard', 'can_view'), asyncHandler(async (req, res) => { const [[items]] = await req.orgDb.query('SELECT COUNT(*) total FROM item_master WHERE is_active=1'); const [[vendors]] = await req.orgDb.query('SELECT COUNT(*) total FROM vendors WHERE is_active=1'); return ok(res, { items: items.total, vendors: vendors.total, plan: req.org.plan }); }));
 protectedRouter.get('/dashboard/alerts', permission('dashboard', 'can_view'), asyncHandler(async (req, res) => { const [rows] = await req.orgDb.query('SELECT * FROM notifications WHERE is_read=0 ORDER BY created_at DESC LIMIT 50'); return ok(res, rows); }));
 protectedRouter.get('/billing/info', permission('finance', 'can_view'), asyncHandler(async (req, res) => { const [pricing] = await masterDb.query('SELECT * FROM plan_pricing WHERE is_active=1 ORDER BY plan,duration_months'); return ok(res, { plan: req.org.plan, trial_ends_at: req.org.trial_ends_at, pricing }); }));
 protectedRouter.get('/billing/invoices', permission('finance', 'can_view'), asyncHandler(async (req, res) => { const [rows] = await masterDb.query('SELECT * FROM subscriptions WHERE org_id=? ORDER BY created_at DESC', { replacements: [req.org.id] }); return ok(res, rows); }));
@@ -128,11 +130,11 @@ protectedRouter.get('/inventory/stock', permission('inventory', 'can_view'), asy
   const page = Math.max(1, Number(req.query.page || 1));
   const limit = Math.min(100, Number(req.query.limit || 20));
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
-  const where = search ? ' AND (im.item_name LIKE ? OR im.item_code LIKE ? OR w.name LIKE ?)' : '';
+  const where = search ? ' AND (im.item_name LIKE ? OR im.item_code LIKE ? OR w.warehouse_name LIKE ?)' : '';
   const replacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`, limit, (page - 1) * limit] : [limit, (page - 1) * limit];
   const [rows] = await req.orgDb.query(`
     SELECT ss.item_id, ss.warehouse_id, ss.current_qty, ss.avg_rate, ss.total_value, ss.last_updated,
-           im.item_code, im.item_name, im.uom_id, w.name AS warehouse_name
+           im.item_code, im.item_name, im.uom_id, w.warehouse_name
     FROM stock_summary ss
     LEFT JOIN item_master im ON im.id = ss.item_id
     LEFT JOIN warehouses w ON w.id = ss.warehouse_id
@@ -174,7 +176,175 @@ protectedRouter.post('/sales/invoices/:id/lines', permission('sales', 'can_edit'
 }));
 protectedRouter.get('/reports/:table/export.xlsx', permission('reports', 'can_export'), asyncHandler(async (req, res) => { const allowedReports = ['activity_log','stock_ledger','invoices','payroll_runs']; if (!allowedReports.includes(req.params.table)) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Report not found' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${req.params.table} ORDER BY 1 DESC LIMIT 10000`); res.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').set('Content-Disposition', `attachment; filename="${req.params.table}.xlsx"`).send(await excel(rows, req.params.table)); }));
 protectedRouter.get('/reports/:table/export.pdf', permission('reports', 'can_export'), asyncHandler(async (req, res) => { const allowedReports = ['activity_log','stock_ledger','invoices','payroll_runs']; if (!allowedReports.includes(req.params.table)) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Report not found' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${req.params.table} ORDER BY 1 DESC LIMIT 1000`); res.type('application/pdf').set('Content-Disposition', `attachment; filename="${req.params.table}.pdf"`).send(await pdf(rows, req.params.table)); }));
-protectedRouter.get('/masters/:type', permission('dashboard', 'can_view'), asyncHandler(async (req, res) => { const map = { items: 'item_master', vendors: 'vendors', customers: 'customers', uom: 'uom_master', hsn: 'hsn_master', departments: 'departments', machines: 'machines', warehouses: 'warehouses' }; const table = map[req.params.type]; if (!table) return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Unknown master' }); const [rows] = await req.orgDb.query(`SELECT * FROM ${table} ORDER BY 1 DESC LIMIT 500`); return ok(res, rows); }));
+protectedRouter.get('/masters/:type', permission('dashboard', 'can_view'), asyncHandler(async (req, res) => {
+  const map = { items: 'item_master', vendors: 'vendors', customers: 'customers', uom: 'uom_master', hsn: 'hsn_master', departments: 'departments', machines: 'machines', warehouses: 'warehouses' };
+  const table = map[req.params.type];
+  if (!table) return fail(res, 404, 'NOT_FOUND', 'Unknown master');
+  // warehouses: return warehouse_name aliased as name for frontend compatibility
+  if (req.params.type === 'warehouses') {
+    const [rows] = await req.orgDb.query('SELECT id, warehouse_code, warehouse_name, warehouse_name AS name, address, is_default, is_active FROM warehouses WHERE is_active=1 ORDER BY warehouse_name LIMIT 500');
+    return ok(res, rows);
+  }
+  const [rows] = await req.orgDb.query(`SELECT * FROM ${table} ORDER BY 1 DESC LIMIT 500`);
+  return ok(res, rows);
+}));
+
+// --- Dedicated HR endpoints with correct column mapping ---
+protectedRouter.get('/hr/employees', permission('hr', 'can_view'), asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Number(req.query.limit || 20));
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const where = search ? ' WHERE (name LIKE ? OR employee_code LIKE ? OR email LIKE ? OR designation LIKE ?)' : '';
+  const replacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, limit, (page - 1) * limit] : [limit, (page - 1) * limit];
+  const countReplacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`] : [];
+  const [[count]] = await req.orgDb.query(`SELECT COUNT(*) AS total FROM employees${where}`, { replacements: countReplacements });
+  const [rows] = await req.orgDb.query(`SELECT id, employee_code, name, email, mobile, designation, department_id, joining_date, employment_type, status, salary, salary_type, basic_salary, is_active, created_at FROM employees${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, { replacements });
+  return ok(res, rows, 'Fetched successfully', { page, limit, total: Number(count.total || 0) });
+}));
+protectedRouter.post('/hr/employees', permission('hr', 'can_create'), asyncHandler(async (req, res) => {
+  const { employee_code, name } = req.body;
+  if (!employee_code || !name) return fail(res, 400, 'VALIDATION_ERROR', 'employee_code and name are required');
+  const id = req.body.id || uuid();
+  const fields = ['id','employee_code','name','email','mobile','designation','department_id','joining_date','employment_type','status','salary','salary_type','basic_salary','is_active'];
+  const values = [id, employee_code, name, req.body.email||null, req.body.mobile||null, req.body.designation||null, req.body.department_id||null, req.body.joining_date||null, req.body.employment_type||'permanent', req.body.status||'active', req.body.salary||0, req.body.salary_type||'monthly', req.body.basic_salary||req.body.salary||0, 1];
+  await req.orgDb.query(`INSERT INTO employees(${fields.join(',')}) VALUES(${fields.map(()=>'?').join(',')})`, { replacements: values });
+  return created(res, { id, employee_code, name });
+}));
+protectedRouter.get('/hr/employees/:id', permission('hr', 'can_view'), asyncHandler(async (req, res) => {
+  const [rows] = await req.orgDb.query('SELECT * FROM employees WHERE id=? LIMIT 1', { replacements: [req.params.id] });
+  return rows[0] ? ok(res, rows[0]) : fail(res, 404, 'NOT_FOUND', 'Employee not found');
+}));
+protectedRouter.put('/hr/employees/:id', permission('hr', 'can_edit'), asyncHandler(async (req, res) => {
+  const allowed = ['name','email','mobile','designation','department_id','joining_date','employment_type','status','salary','salary_type','basic_salary','is_active','manager_id'];
+  const keys = Object.keys(req.body).filter(k => allowed.includes(k));
+  if (!keys.length) return fail(res, 400, 'VALIDATION_ERROR', 'No valid fields to update');
+  await req.orgDb.query(`UPDATE employees SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`, { replacements: [...keys.map(k=>req.body[k]), req.params.id] });
+  return ok(res, { id: req.params.id, ...req.body }, 'Employee updated');
+}));
+
+// --- Dedicated Warehouses endpoints ---
+protectedRouter.get('/inventory/warehouses', permission('inventory', 'can_view'), asyncHandler(async (req, res) => {
+  const [rows] = await req.orgDb.query('SELECT id, warehouse_code, warehouse_name, warehouse_name AS name, address, city, is_default, is_active FROM warehouses ORDER BY warehouse_name LIMIT 200');
+  return ok(res, rows);
+}));
+protectedRouter.post('/inventory/warehouses', permission('inventory', 'can_create'), asyncHandler(async (req, res) => {
+  if (!req.body.warehouse_name) return fail(res, 400, 'VALIDATION_ERROR', 'warehouse_name is required');
+  const id = req.body.id || uuid();
+  await req.orgDb.query('INSERT INTO warehouses(id,warehouse_code,warehouse_name,address,city,is_default,is_active) VALUES(?,?,?,?,?,?,1)', { replacements: [id, req.body.warehouse_code||null, req.body.warehouse_name, req.body.address||null, req.body.city||null, req.body.is_default?1:0] });
+  return created(res, { id, warehouse_name: req.body.warehouse_name });
+}));
+protectedRouter.put('/inventory/warehouses/:id', permission('inventory', 'can_edit'), asyncHandler(async (req, res) => {
+  const allowed = ['warehouse_code','warehouse_name','address','city','is_default','is_active'];
+  const keys = Object.keys(req.body).filter(k => allowed.includes(k));
+  if (!keys.length) return fail(res, 400, 'VALIDATION_ERROR', 'No valid fields to update');
+  await req.orgDb.query(`UPDATE warehouses SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`, { replacements: [...keys.map(k=>req.body[k]), req.params.id] });
+  return ok(res, { id: req.params.id, ...req.body }, 'Warehouse updated');
+}));
+
+// --- Dedicated Items endpoint with full fields ---
+protectedRouter.get('/inventory/items', permission('inventory', 'can_view'), asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Number(req.query.limit || 20));
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const where = search ? ' WHERE (item_name LIKE ? OR item_code LIKE ? OR category LIKE ?)' : ' WHERE 1=1';
+  const replacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`, limit, (page-1)*limit] : [limit, (page-1)*limit];
+  const countReplacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`] : [];
+  const [[count]] = await req.orgDb.query(`SELECT COUNT(*) AS total FROM item_master${where}`, { replacements: countReplacements });
+  const [rows] = await req.orgDb.query(`SELECT * FROM item_master${where} ORDER BY item_name LIMIT ? OFFSET ?`, { replacements });
+  return ok(res, rows, 'Fetched successfully', { page, limit, total: Number(count.total || 0) });
+}));
+protectedRouter.post('/inventory/items', permission('inventory', 'can_create'), asyncHandler(async (req, res) => {
+  if (!req.body.item_code || !req.body.item_name) return fail(res, 400, 'VALIDATION_ERROR', 'item_code and item_name are required');
+  const id = req.body.id || uuid();
+  const fields = ['id','item_code','item_name','category','uom_id','hsn_code','gst_rate','reorder_level','reorder_qty','standard_cost','description','is_active','created_by'];
+  const values = [id, req.body.item_code, req.body.item_name, req.body.category||null, req.body.uom_id||null, req.body.hsn_code||null, req.body.gst_rate||18, req.body.reorder_level||0, req.body.reorder_qty||0, req.body.standard_cost||0, req.body.description||null, 1, req.user.sub];
+  await req.orgDb.query(`INSERT INTO item_master(${fields.join(',')}) VALUES(${fields.map(()=>'?').join(',')})`, { replacements: values });
+  return created(res, { id, item_code: req.body.item_code, item_name: req.body.item_name });
+}));
+protectedRouter.put('/inventory/items/:id', permission('inventory', 'can_edit'), asyncHandler(async (req, res) => {
+  const allowed = ['item_code','item_name','category','uom_id','hsn_code','gst_rate','reorder_level','reorder_qty','standard_cost','description','is_active'];
+  const keys = Object.keys(req.body).filter(k => allowed.includes(k));
+  if (!keys.length) return fail(res, 400, 'VALIDATION_ERROR', 'No valid fields to update');
+  await req.orgDb.query(`UPDATE item_master SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`, { replacements: [...keys.map(k=>req.body[k]), req.params.id] });
+  return ok(res, { id: req.params.id, ...req.body }, 'Item updated');
+}));
+protectedRouter.get('/inventory/items/:id', permission('inventory', 'can_view'), asyncHandler(async (req, res) => {
+  const [rows] = await req.orgDb.query('SELECT * FROM item_master WHERE id=? LIMIT 1', { replacements: [req.params.id] });
+  return rows[0] ? ok(res, rows[0]) : fail(res, 404, 'NOT_FOUND', 'Item not found');
+}));
+
+// --- Dedicated Vendors endpoint ---
+protectedRouter.get('/vendors', permission('purchase', 'can_view'), asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Number(req.query.limit || 20));
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const where = search ? ' WHERE (company_name LIKE ? OR vendor_code LIKE ? OR email LIKE ?)' : '';
+  const replacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`, limit, (page-1)*limit] : [limit, (page-1)*limit];
+  const countReplacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`] : [];
+  const [[count]] = await req.orgDb.query(`SELECT COUNT(*) AS total FROM vendors${where}`, { replacements: countReplacements });
+  const [rows] = await req.orgDb.query(`SELECT * FROM vendors${where} ORDER BY company_name LIMIT ? OFFSET ?`, { replacements });
+  return ok(res, rows, 'Fetched successfully', { page, limit, total: Number(count.total || 0) });
+}));
+protectedRouter.post('/vendors', permission('purchase', 'can_create'), asyncHandler(async (req, res) => {
+  if (!req.body.company_name) return fail(res, 400, 'VALIDATION_ERROR', 'company_name is required');
+  const id = req.body.id || uuid();
+  await req.orgDb.query('INSERT INTO vendors(id,vendor_code,company_name,contact_person,phone,email,gstin,state,address,payment_terms,vendor_type) VALUES(?,?,?,?,?,?,?,?,?,?,?)', { replacements: [id, req.body.vendor_code||null, req.body.company_name, req.body.contact_person||null, req.body.phone||null, req.body.email||null, req.body.gstin||null, req.body.state||null, req.body.address||null, req.body.payment_terms||30, req.body.vendor_type||'material'] });
+  return created(res, { id, company_name: req.body.company_name });
+}));
+protectedRouter.put('/vendors/:id', permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
+  const allowed = ['vendor_code','company_name','contact_person','phone','email','gstin','state','address','payment_terms','vendor_type','is_active'];
+  const keys = Object.keys(req.body).filter(k => allowed.includes(k));
+  if (!keys.length) return fail(res, 400, 'VALIDATION_ERROR', 'No valid fields to update');
+  await req.orgDb.query(`UPDATE vendors SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`, { replacements: [...keys.map(k=>req.body[k]), req.params.id] });
+  return ok(res, { id: req.params.id, ...req.body }, 'Vendor updated');
+}));
+protectedRouter.get('/vendors/:id', permission('purchase', 'can_view'), asyncHandler(async (req, res) => {
+  const [rows] = await req.orgDb.query('SELECT * FROM vendors WHERE id=? LIMIT 1', { replacements: [req.params.id] });
+  return rows[0] ? ok(res, rows[0]) : fail(res, 404, 'NOT_FOUND', 'Vendor not found');
+}));
+
+// --- Dedicated Customers endpoint ---
+protectedRouter.get('/customers', permission('sales', 'can_view'), asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Number(req.query.limit || 20));
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const where = search ? ' WHERE (company_name LIKE ? OR customer_code LIKE ? OR email LIKE ?)' : '';
+  const replacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`, limit, (page-1)*limit] : [limit, (page-1)*limit];
+  const countReplacements = search ? [`%${search}%`, `%${search}%`, `%${search}%`] : [];
+  const [[count]] = await req.orgDb.query(`SELECT COUNT(*) AS total FROM customers${where}`, { replacements: countReplacements });
+  const [rows] = await req.orgDb.query(`SELECT * FROM customers${where} ORDER BY company_name LIMIT ? OFFSET ?`, { replacements });
+  return ok(res, rows, 'Fetched successfully', { page, limit, total: Number(count.total || 0) });
+}));
+protectedRouter.post('/customers', permission('sales', 'can_create'), asyncHandler(async (req, res) => {
+  if (!req.body.company_name) return fail(res, 400, 'VALIDATION_ERROR', 'company_name is required');
+  const id = req.body.id || uuid();
+  await req.orgDb.query('INSERT INTO customers(id,customer_code,company_name,contact_person,phone,email,gstin,state,address,payment_terms) VALUES(?,?,?,?,?,?,?,?,?,?)', { replacements: [id, req.body.customer_code||null, req.body.company_name, req.body.contact_person||null, req.body.phone||null, req.body.email||null, req.body.gstin||null, req.body.state||null, req.body.address||null, req.body.payment_terms||30] });
+  return created(res, { id, company_name: req.body.company_name });
+}));
+protectedRouter.put('/customers/:id', permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
+  const allowed = ['customer_code','company_name','contact_person','phone','email','gstin','state','address','payment_terms','credit_limit','is_active'];
+  const keys = Object.keys(req.body).filter(k => allowed.includes(k));
+  if (!keys.length) return fail(res, 400, 'VALIDATION_ERROR', 'No valid fields to update');
+  await req.orgDb.query(`UPDATE customers SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`, { replacements: [...keys.map(k=>req.body[k]), req.params.id] });
+  return ok(res, { id: req.params.id, ...req.body }, 'Customer updated');
+}));
+protectedRouter.get('/customers/:id', permission('sales', 'can_view'), asyncHandler(async (req, res) => {
+  const [rows] = await req.orgDb.query('SELECT * FROM customers WHERE id=? LIMIT 1', { replacements: [req.params.id] });
+  return rows[0] ? ok(res, rows[0]) : fail(res, 404, 'NOT_FOUND', 'Customer not found');
+}));
+
+// --- Enhanced dashboard summary ---
+protectedRouter.get('/dashboard/summary', permission('dashboard', 'can_view'), asyncHandler(async (req, res) => {
+  const [[items]] = await req.orgDb.query('SELECT COUNT(*) total FROM item_master WHERE is_active=1');
+  const [[vendors]] = await req.orgDb.query('SELECT COUNT(*) total FROM vendors WHERE is_active=1');
+  const [[customers]] = await req.orgDb.query('SELECT COUNT(*) total FROM customers WHERE is_active=1');
+  const [[openOrders]] = await req.orgDb.query("SELECT COUNT(*) total FROM purchase_orders WHERE status NOT IN ('cancelled','confirmed')");
+  const [[openSales]] = await req.orgDb.query("SELECT COUNT(*) total FROM sales_orders WHERE status NOT IN ('cancelled','delivered')");
+  const [[stockValue]] = await req.orgDb.query('SELECT COALESCE(SUM(total_value),0) total FROM stock_summary');
+  const [[openWO]] = await req.orgDb.query("SELECT COUNT(*) total FROM work_orders WHERE status IN ('released','in_progress')");
+  const [[pendingInvoices]] = await req.orgDb.query('SELECT COALESCE(SUM(balance_amount),0) total FROM invoices WHERE balance_amount > 0');
+  return ok(res, { items: items.total, vendors: vendors.total, customers: customers.total, plan: req.org.plan, open_purchase_orders: openOrders.total, open_sales_orders: openSales.total, stock_value: Number(stockValue.total||0), open_work_orders: openWO.total, pending_receivables: Number(pendingInvoices.total||0) });
+}));
 app.use('/api/v1', protectedRouter);
 app.use('/api/v1', workflowRoutes);
 app.use('/api/v1/forecasting', auth, orgContext, entitlement, forecastingRoutes);
@@ -182,13 +352,15 @@ app.use('/api/v1/reports', auth, orgContext, entitlement, smartReportsRoutes);
 // Inventory and purchasing foundations use explicit handlers for tenant-safe filtering,
 // validated workflow transitions, and transactional GRN posting.
 app.use('/api/v1', inventoryPurchaseRoutes);
+// Purchase, Inventory, and Sales module routes
+app.use('/api/v1/purchase', auth, orgContext, entitlement, purchaseRoutes);
+app.use('/api/v1/inventory', auth, orgContext, entitlement, inventoryRoutes);
+app.use('/api/v1/sales', auth, orgContext, entitlement, salesRoutes);
 // Quality, HR, payroll, finance, GST and analytics foundations.
 app.use('/api/v1', nextDomainsRoutes);
 app.use('/api/v1', operationalDomainsRoutes);
 // Batch 2 transactional Sales/Dispatch and Production workflows.
 app.use('/api/v1/sales', salesProductionSalesRoutes);
-// Customer APIs retain the existing top-level /customers convention.
-app.use('/api/v1', salesProductionSalesRoutes);
 app.use('/api/v1/production', salesProductionProductionRoutes);
 app.use('/api/v1', zeroGapClosureRoutes);
 const adminRouter = express.Router();
@@ -362,12 +534,11 @@ userRouter.delete('/:id', perm('settings', 'can_delete'), asyncHandler(async (re
 }));
 app.use('/api/v1/settings/users', userRouter);
 const mounts = [
-  ['inventory/items','item_master','inventory'], ['inventory/ledger','stock_ledger','inventory'], ['inventory/gate-pass','gate_pass','inventory'],
-  ['purchase/requisitions','purchase_requisitions','purchase'], ['purchase/orders','purchase_orders','purchase'], ['purchase/grn','grn','purchase'], ['vendors','vendors','purchase'],
-  ['customers','customers','sales'], ['production/bom','bom','production'], ['production/work-orders','work_orders','production'], ['jobwork/orders','job_work_orders','jobwork'],
-  ['quality/inspections','qc_inspections','quality'], ['sales/quotations','quotations','sales'], ['sales/orders','sales_orders','sales'], ['sales/invoices','invoices','sales'],
-  ['sales/challans','delivery_challans','sales'], ['hr/employees','employees','hr'], ['hr/attendance','attendance','hr'], ['hr/leaves','leave_requests','hr'],
-  ['notifications','notifications','dashboard'], ['settings/users','users','settings'], ['settings/company','company_settings','settings'], ['reports/records','activity_log','reports']
+  ['inventory/ledger','stock_ledger','inventory'], ['inventory/gate-pass','gate_pass','inventory'],
+  ['production/bom','bom','production'], ['production/work-orders','work_orders','production'], ['jobwork/orders','job_work_orders','jobwork'],
+  ['quality/inspections','qc_inspections','quality'],
+  ['hr/attendance','attendance','hr'], ['hr/leaves','leave_requests','hr'],
+  ['notifications','notifications','dashboard'], ['settings/company','company_settings','settings'], ['reports/records','activity_log','reports']
 ];
 // Aliases keep the public API stable while exposing the complete ERP navigation.
 mounts.push(
