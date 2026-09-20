@@ -17,7 +17,7 @@ async function getDemandForecast(orgDb, itemId = null) {
   let itemFilter = '';
   const replacements = [];
   if (itemId) {
-    itemFilter = 'WHERE im.id = ?';
+    itemFilter = 'AND im.id = ?';
     replacements.push(itemId);
   }
 
@@ -27,16 +27,16 @@ async function getDemandForecast(orgDb, itemId = null) {
       soi.item_id,
       im.item_name,
       im.item_code,
-      DATE_FORMAT(so.created_at, '%Y-%m') as year_month,
+      DATE_FORMAT(so.created_at, '%Y-%m') as sales_month,
       YEAR(so.created_at) as yr,
       MONTH(so.created_at) as mo,
       COALESCE(SUM(soi.quantity), 0) as total_qty
     FROM sales_order_items soi
     JOIN sales_orders so ON so.id = soi.order_id
     JOIN item_master im ON im.id = soi.item_id
-    ${itemFilter}
     WHERE so.created_at >= DATE_SUB(CURDATE(), INTERVAL 14 MONTH)
-    GROUP BY soi.item_id, im.item_name, im.item_code, year_month, yr, mo
+      ${itemFilter}
+    GROUP BY soi.item_id, im.item_name, im.item_code, DATE_FORMAT(so.created_at, '%Y-%m'), YEAR(so.created_at), MONTH(so.created_at)
     ORDER BY yr ASC, mo ASC
   `, { replacements });
 
@@ -51,7 +51,7 @@ async function getDemandForecast(orgDb, itemId = null) {
         monthly: {}
       };
     }
-    itemMap[r.item_id].monthly[r.year_month] = Number(r.total_qty);
+    itemMap[r.item_id].monthly[r.sales_month] = Number(r.total_qty);
   }
 
   const results = [];
