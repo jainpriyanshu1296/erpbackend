@@ -281,8 +281,8 @@ ALTER TABLE customers
   ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) DEFAULT 0;
 
 -- ============ INDEXES FOR PERFORMANCE ============
-CREATE INDEX IF NOT EXISTS idx_stock_ledger_item ON stock_ledger(item_id);
-CREATE INDEX IF NOT EXISTS idx_stock_ledger_warehouse ON stock_ledger(warehouse_id);
-CREATE INDEX IF NOT EXISTS idx_stock_ledger_type ON stock_ledger(transaction_type);
-CREATE INDEX IF NOT EXISTS idx_stock_summary_item ON stock_summary(item_id);
-CREATE INDEX IF NOT EXISTS idx_stock_summary_warehouse ON stock_summary(warehouse_id);
+CREATE INDEX idx_stock_ledger_item ON stock_ledger(item_id);
+CREATE INDEX idx_stock_ledger_warehouse ON stock_ledger(warehouse_id);
+CREATE INDEX idx_stock_ledger_type ON stock_ledger(transaction_type);
+CREATE INDEX idx_stock_summary_item ON stock_summary(item_id);
+CREATE INDEX idx_stock_summary_warehouse ON stock_summary(warehouse_id);
