@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transition, dispatch, transitionJobCard, calculateMRP, resolveOutputQuantity } = require('../src/services/salesProduction.service');
+const { transition, dispatch, transitionJobCard, calculateMRP, resolveOutputQuantity, assertProductionLink } = require('../src/services/salesProduction.service');
 
 function fakeDb(mode = 'sales') {
   const state = { status: 'draft', effect: false, qty: 10, ledger: 0 };
@@ -80,4 +80,12 @@ test('production output normalizes decimal strings and rejects invalid or excess
   assert.throws(() => resolveOutputQuantity('0.000', '10.000', '0.000'), /positive/);
   assert.throws(() => resolveOutputQuantity('0.000', '10.000', '11.000'), /cannot exceed/);
   assert.throws(() => resolveOutputQuantity('not-a-number', '10.000', 'not-a-number'), /positive/);
+});
+
+test('production output requires a matching released production-order relationship', () => {
+  const order={bom_id:'bom-1',finished_item_id:'fg-1'};
+  assert.equal(assertProductionLink({status:'released',bom_id:'bom-1',item_id:'fg-1',planned_qty:'10.000'},order,10).status,'released');
+  assert.throws(()=>assertProductionLink(null,order,10),/matching released production order/);
+  assert.throws(()=>assertProductionLink({status:'draft',bom_id:'bom-1',item_id:'fg-1',planned_qty:10},order,10),/matching released production order/);
+  assert.throws(()=>assertProductionLink({status:'released',bom_id:'other',item_id:'fg-1',planned_qty:10},order,10),/matching released production order/);
 });

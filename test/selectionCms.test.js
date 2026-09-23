@@ -6,6 +6,7 @@ const cms = require('../src/services/cms.service');
 const {provisionOrganization} = require('../src/services/onboarding.service');
 const {validateIdentity} = require('../src/utils/provisioningValidation');
 const {postPhysicalCount} = require('../src/services/zeroGapClosure.service');
+const {aggregateItemQuantities}=require('../src/utils/workflowValidation');
 
 test('invalid admin plans never provision a free organization and retain field errors', async () => {
   const identity={company_name:'Test company',owner_email:'owner@example.test',password:'secure-test-only',slug:'test-company',duration_months:1};
@@ -52,7 +53,7 @@ test('valid plan price resolves one canonical duration and invalid ID is rejecte
 });
 
 test('physical count posting and replay keep stock, ledger, effect, and audit idempotent', async () => {
-  const state={status:'approved',qty:5,effect:false,ledger:0,audit:0,commits:0};
+  const state={status:'submitted',qty:5,effect:false,ledger:0,audit:0,commits:0};
   const tx={commit:async()=>{state.commits++;},rollback:async()=>{}};
   const db={transaction:async()=>tx,query:async(sql,options={})=>{
     assert.equal(options.transaction,tx);
@@ -68,7 +69,16 @@ test('physical count posting and replay keep stock, ledger, effect, and audit id
     if(sql.startsWith('INSERT INTO audit_events')) {state.audit++;assert.deepEqual(options.replacements.slice(2,6),['zero_gap_closure','physical_count_posted','physical_count','count-1']);return [[]];}
     throw new Error(`Unexpected query: ${sql}`);
   }};
+  await assert.rejects(postPhysicalCount(db,'count-1','user-1'),/must be approved/);
+  state.status='approved';
   assert.equal((await postPhysicalCount(db,'count-1','user-1')).status,'posted');
   assert.equal((await postPhysicalCount(db,'count-1','user-1')).already_applied,true);
   assert.deepEqual({qty:state.qty,ledger:state.ledger,audit:state.audit},{qty:7,ledger:1,audit:1});
+});
+
+test('duplicate return lines are aggregated before source-quantity validation',()=>{
+  const totals=aggregateItemQuantities([{item_id:'item-1',return_qty:'3'},{item_id:'item-1',return_qty:4},{item_id:'item-2',return_qty:1}],'return_qty');
+  assert.equal(totals.get('item-1'),7);
+  assert.equal(totals.get('item-2'),1);
+  assert.throws(()=>aggregateItemQuantities([{item_id:'item-1',return_qty:'NaN'}],'return_qty'),/positive/);
 });

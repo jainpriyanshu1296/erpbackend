@@ -210,7 +210,7 @@ async function postPhysicalCount(db, countId, userId) {
     const [counts] = await db.query('SELECT * FROM physical_counts WHERE id=? FOR UPDATE', { replacements: [countId], transaction: tx });
     assert(counts.length, 'Physical count not found');
     if(counts[0].status==='posted'){await tx.commit();return {id:countId,status:'posted',already_applied:true};}
-    assert(['approved', 'submitted'].includes(counts[0].status), 'Count must be submitted or approved before posting');
+    assert(counts[0].status === 'approved', 'Count must be approved before posting');
     const [lines] = await db.query('SELECT * FROM physical_count_lines WHERE count_id=? FOR UPDATE', { replacements: [countId], transaction: tx });
     assert(lines.length && lines.every(line => line.counted_qty !== null), 'All physical count lines must be counted');
     for (const line of lines) {

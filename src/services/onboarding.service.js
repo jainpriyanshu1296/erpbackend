@@ -74,11 +74,13 @@ async function provisionOrganization(input) {
     if(!databases.length) await root.query(`CREATE DATABASE \`${dbName.replace(/`/g, '')}\``);
     await root.changeUser({ database: dbName });
     await applyMigrationsToDb(root, dbName, 'org');
-    const [admins] = await root.query('SELECT id FROM users WHERE email=? LIMIT 1', [input.owner_email]);
+    const [admins] = await root.query('SELECT id,role,is_active FROM users WHERE email=? LIMIT 1', [input.owner_email]);
+    if (admins.length && !['admin','superadmin'].includes(String(admins[0].role || '').toLowerCase())) throw Object.assign(new Error('The owner email already belongs to a non-administrator account'),{status:409,code:'PROVISIONING_ADMIN_CONFLICT'});
     const adminId = admins[0]?.id || uuid();
     if (!admins.length) await root.query('INSERT INTO users (id,name,email,password_hash,role,is_active) VALUES (?,?,?,?,?,1)', [
       adminId, input.owner_name || input.company_name, input.owner_email, passwordHash, 'admin'
     ]);
+    else if (!admins[0].is_active) await root.query('UPDATE users SET is_active=1 WHERE id=?',[adminId]);
     await root.end();
     await masterDb.transaction(async transaction => {
       await masterDb.query('UPDATE organizations SET status="active",is_active=1,is_trial=?,plan_started_at=NOW(),plan_expires_at=DATE_ADD(NOW(),INTERVAL ? MONTH) WHERE id=?', { replacements: [input.plan === 'free' ? 1 : 0,duration,id],transaction });

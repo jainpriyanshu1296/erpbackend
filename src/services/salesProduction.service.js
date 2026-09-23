@@ -14,6 +14,10 @@ function resolveOutputQuantity(producedQuantity, plannedQuantity, requestedQuant
   if (!Number.isFinite(output) || output <= 0 || output > planned) throw invalid('Work order output must be positive and cannot exceed planned quantity');
   return output;
 }
+function assertProductionLink(link, order, planned) {
+  if (!link || !['released','in_progress'].includes(link.status) || link.bom_id!==order.bom_id || link.item_id!==order.finished_item_id || Number(link.planned_qty)!==Number(planned)) throw invalid('Work order must belong to a matching released production order');
+  return link;
+}
 
 const transitions = {
   quotations: { draft: ['sent', 'cancelled'], sent: ['accepted', 'rejected', 'expired'], accepted: ['cancelled'] },
@@ -161,13 +165,8 @@ async function completeWorkOrder(db, workOrderId, warehouseId, userId, requested
     if (order.status !== 'in_progress') throw invalid(`Cannot complete work order from ${order.status}`, 'CONFLICT');
     if (!warehouseId) throw invalid('warehouse_id is required');
     const planned = Number(order.planned_qty);
-    let [[link]]=await db.query("SELECT source_id FROM related_documents WHERE source_type='production_order' AND target_type='work_order' AND target_id=? AND relation='execution' LIMIT 1",{replacements:[workOrderId],transaction:tx});
-    if (!link) {
-      const productionId=uuid();
-      await db.query("INSERT INTO production_orders(id,production_number,so_id,bom_id,item_id,planned_qty,status,created_by) VALUES(?,?,?,?,?,?,'in_progress',?)",{replacements:[productionId,`PROD-${productionId}`,order.so_id || null,order.bom_id,order.finished_item_id,order.planned_qty,userId],transaction:tx});
-      await db.query("INSERT INTO related_documents(id,source_type,source_id,target_type,target_id,relation,created_by) VALUES(?,'production_order',?,'work_order',?,'execution',?)",{replacements:[uuid(),productionId,workOrderId,userId],transaction:tx});
-      link={source_id:productionId};
-    }
+    const [[link]]=await db.query("SELECT rd.source_id,p.status,p.bom_id,p.item_id,p.planned_qty FROM related_documents rd JOIN production_orders p ON p.id=rd.source_id WHERE rd.source_type='production_order' AND rd.target_type='work_order' AND rd.target_id=? AND rd.relation='execution' LIMIT 1 FOR UPDATE",{replacements:[workOrderId],transaction:tx});
+    assertProductionLink(link,order,planned);
     const outputId=requestedOutputId || uuid();
     let requested = null;
     if (requestedOutputId) {
@@ -226,6 +225,7 @@ async function createSalesOrderFromQuotation(db, quotationId) {
     if (!['accepted', 'approved'].includes(quote.status)) throw invalid('Only an accepted quotation can create an order', 'CONFLICT');
     const [source] = await db.query('SELECT * FROM quotation_items WHERE quotation_id=? ORDER BY id', { replacements: [quotationId], transaction: tx });
     if (!source.length) throw invalid('Quotation has no items');
+    if (new Set(source.map(item=>item.item_id)).size!==source.length) throw invalid('Quotation contains duplicate item lines and must be corrected before conversion');
     const id = uuid(), number = await nextNumber(db, 'sales_order', 'SO-', 5, tx);
     await db.query("INSERT INTO sales_orders(id,so_number,quotation_id,customer_id,status,total_amount) VALUES(?,?,?,?,'confirmed',?)", { replacements: [id, number, quotationId, quote.customer_id, Number(quote.total_amount || 0)], transaction: tx });
     for (const item of source) await db.query('INSERT INTO sales_order_items(id,so_id,item_id,quantity,rate,discount_percent,gst_rate,quotation_item_id) VALUES(?,?,?,?,?,?,?,?)', { replacements: [uuid(), id, item.item_id, item.quantity, item.rate, item.discount_percent || 0, item.gst_rate ?? 0, item.id], transaction: tx });
@@ -235,4 +235,4 @@ async function createSalesOrderFromQuotation(db, quotationId) {
   } catch (error) { await tx.rollback(); throw error; }
 }
 
-module.exports = { transition, dispatch, completeWorkOrder, issueMaterials, transitionJobCard, calculateMRP, resolveOutputQuantity, releaseProductionOrder, createSalesOrderFromQuotation };
+module.exports = { transition, dispatch, completeWorkOrder, issueMaterials, transitionJobCard, calculateMRP, resolveOutputQuantity, assertProductionLink, releaseProductionOrder, createSalesOrderFromQuotation };

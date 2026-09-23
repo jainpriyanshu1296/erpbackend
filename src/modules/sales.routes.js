@@ -49,6 +49,7 @@ router.post('/quotations', permission('sales', 'can_create'), asyncHandler(async
   if (!items || !Array.isArray(items) || items.length === 0) {
     return fail(res, 400, 'VALIDATION_ERROR', 'At least one item is required');
   }
+  if (new Set(items.map(item=>item.item_id)).size!==items.length) return fail(res,400,'VALIDATION_ERROR','Each quotation item may appear only once');
   
   for (const item of items) {
     const quantity=Number(item.quantity),rate=Number(item.rate),discount=Number(item.discount_percent || 0),gst=Number(item.gst_rate ?? 18);
@@ -173,6 +174,7 @@ router.post('/orders', permission('sales', 'can_create'), asyncHandler(async (re
   if (!items || !Array.isArray(items) || items.length === 0) {
     return fail(res, 400, 'VALIDATION_ERROR', 'At least one item is required');
   }
+  if (new Set(items.map(item=>item.item_id)).size!==items.length) return fail(res,400,'VALIDATION_ERROR','Each sales-order item may appear only once');
 
   for (const item of items) {
     const quantity=Number(item.quantity),rate=Number(item.rate),discount=Number(item.discount_percent || 0),gst=Number(item.gst_rate ?? 18);
@@ -297,13 +299,13 @@ router.get('/delivery-challans', permission('sales', 'can_view'), asyncHandler(a
 router.post('/delivery-challans', permission('sales', 'can_create'), asyncHandler(async (req, res) => {
   const { customer_id, so_id, items, warehouse_id, delivery_date, notes } = req.body;
   
-  if (!customer_id) return fail(res, 400, 'VALIDATION_ERROR', 'customer_id is required');
+  if (!customer_id || !so_id || !warehouse_id) return fail(res, 400, 'VALIDATION_ERROR', 'customer_id, so_id and warehouse_id are required');
   if (!items || !Array.isArray(items) || items.length === 0) {
     return fail(res, 400, 'VALIDATION_ERROR', 'At least one item is required');
   }
   
   for (const item of items) {
-    if (!item.item_id || Number(item.quantity) <= 0) {
+    if (!item.item_id || !Number.isFinite(Number(item.quantity)) || Number(item.quantity) <= 0) {
       return fail(res, 400, 'VALIDATION_ERROR', 'Each item must have item_id and positive quantity');
     }
   }
@@ -323,10 +325,10 @@ router.post('/delivery-challans', permission('sales', 'can_create'), asyncHandle
     
     for (const item of items) {
       await req.orgDb.query(`
-        INSERT INTO delivery_challan_items(id, challan_id, item_id, quantity, rate)
-        VALUES(?, ?, ?, ?, ?)
+        INSERT INTO delivery_challan_items(id, challan_id, order_item_id, item_id, quantity, rate)
+        VALUES(?, ?, ?, ?, ?, ?)
       `, {
-        replacements: [uuid(), challanId, item.item_id, item.quantity, item.rate || 0],
+        replacements: [uuid(), challanId, item.order_item_id || null, item.item_id, item.quantity, item.rate || 0],
         transaction: tx
       });
     }
@@ -374,7 +376,7 @@ router.get('/returns', permission('sales', 'can_view'), asyncHandler(async (req,
 router.post('/returns', permission('sales', 'can_create'), asyncHandler(async (req, res) => {
   const { customer_id, so_id, items, warehouse_id, reason, notes } = req.body;
 
-  if (!customer_id) return fail(res, 400, 'VALIDATION_ERROR', 'customer_id is required');
+  if (!customer_id || !so_id) return fail(res, 400, 'VALIDATION_ERROR', 'customer_id and so_id are required');
   if (!items || !Array.isArray(items) || items.length === 0) {
     return fail(res, 400, 'VALIDATION_ERROR', 'At least one item is required');
   }
@@ -393,10 +395,11 @@ router.post('/returns', permission('sales', 'can_create'), asyncHandler(async (r
     if(so_id) {
       const [[order]]=await req.orgDb.query('SELECT id,customer_id FROM sales_orders WHERE id=? FOR UPDATE',{replacements:[so_id],transaction:tx});
       if(!order || order.customer_id!==customer_id) throw Object.assign(new Error('Sales order does not belong to this customer'),{status:409,code:'INVALID_RETURN'});
-      for(const item of items) {
-        const [[sent]]=await req.orgDb.query("SELECT COALESCE(SUM(dci.quantity),0) quantity FROM delivery_challan_items dci JOIN delivery_challans dc ON dc.id=dci.challan_id WHERE dc.so_id=? AND dci.item_id=? AND dc.status IN ('dispatched','delivered') FOR UPDATE",{replacements:[so_id,item.item_id],transaction:tx});
-        const [[returned]]=await req.orgDb.query("SELECT COALESCE(SUM(sri.quantity),0) quantity FROM sales_return_items sri JOIN sales_returns sr ON sr.id=sri.return_id WHERE sr.so_id=? AND sri.item_id=? AND sr.status<>'cancelled' FOR UPDATE",{replacements:[so_id,item.item_id],transaction:tx});
-        if(Number(returned.quantity)+Number(item.return_qty)>Number(sent.quantity)) throw Object.assign(new Error('Return quantity exceeds dispatched quantity'),{status:409,code:'INVALID_RETURN'});
+      const requested=require('../utils/workflowValidation').aggregateItemQuantities(items,'return_qty');
+      for(const [itemId,returnQty] of requested) {
+        const [[sent]]=await req.orgDb.query("SELECT COALESCE(SUM(dci.quantity),0) quantity FROM delivery_challan_items dci JOIN delivery_challans dc ON dc.id=dci.challan_id WHERE dc.so_id=? AND dci.item_id=? AND dc.status IN ('dispatched','delivered') FOR UPDATE",{replacements:[so_id,itemId],transaction:tx});
+        const [[returned]]=await req.orgDb.query("SELECT COALESCE(SUM(sri.quantity),0) quantity FROM sales_return_items sri JOIN sales_returns sr ON sr.id=sri.return_id WHERE sr.so_id=? AND sri.item_id=? AND sr.status<>'cancelled' FOR UPDATE",{replacements:[so_id,itemId],transaction:tx});
+        if(Number(returned.quantity)+returnQty>Number(sent.quantity)) throw Object.assign(new Error('Return quantity exceeds dispatched quantity'),{status:409,code:'INVALID_RETURN'});
       }
     }
     const returnId = uuid();

@@ -450,13 +450,13 @@ router.get('/returns', permission('purchase', 'can_view'), asyncHandler(async (r
 router.post('/returns', permission('purchase', 'can_create'), asyncHandler(async (req, res) => {
   const { vendor_id, grn_id, items, warehouse_id, reason, notes } = req.body;
   
-  if (!vendor_id) return fail(res, 400, 'VALIDATION_ERROR', 'vendor_id is required');
+  if (!vendor_id || !grn_id) return fail(res, 400, 'VALIDATION_ERROR', 'vendor_id and grn_id are required');
   if (!items || !Array.isArray(items) || items.length === 0) {
     return fail(res, 400, 'VALIDATION_ERROR', 'At least one item is required');
   }
   
   for (const item of items) {
-    if (!item.item_id || Number(item.return_qty) <= 0) {
+    if (!item.item_id || !Number.isFinite(Number(item.return_qty)) || Number(item.return_qty) <= 0) {
       return fail(res, 400, 'VALIDATION_ERROR', 'Each item must have item_id and positive return_qty');
     }
   }
@@ -469,10 +469,11 @@ router.post('/returns', permission('purchase', 'can_create'), asyncHandler(async
     if(grn_id) {
       const [[grn]]=await req.orgDb.query("SELECT id,vendor_id,warehouse_id FROM grn WHERE id=? AND status='posted' FOR UPDATE",{replacements:[grn_id],transaction:tx});
       if(!grn || grn.vendor_id!==vendor_id || grn.warehouse_id!==warehouse_id) throw Object.assign(new Error('Return must match a posted receipt, vendor and warehouse'),{status:409,code:'INVALID_RETURN'});
-      for(const item of items) {
-        const [[accepted]]=await req.orgDb.query("SELECT COALESCE(SUM(accepted_qty),0) quantity FROM qc_inspections WHERE inspection_type='incoming' AND COALESCE(reference_id,source_id)=? AND item_id=? AND status IN ('processed','closed') FOR UPDATE",{replacements:[grn_id,item.item_id],transaction:tx});
-        const [[returned]]=await req.orgDb.query("SELECT COALESCE(SUM(pri.quantity),0) quantity FROM purchase_return_items pri JOIN purchase_returns pr ON pr.id=pri.return_id WHERE pr.grn_id=? AND pri.item_id=? AND pr.status<>'cancelled' FOR UPDATE",{replacements:[grn_id,item.item_id],transaction:tx});
-        if(Number(returned.quantity)+Number(item.return_qty)>Number(accepted.quantity)) throw Object.assign(new Error('Return quantity exceeds QC-accepted receipt quantity'),{status:409,code:'INVALID_RETURN'});
+      const requested=require('../utils/workflowValidation').aggregateItemQuantities(items,'return_qty');
+      for(const [itemId,returnQty] of requested) {
+        const [[accepted]]=await req.orgDb.query("SELECT COALESCE(SUM(accepted_qty),0) quantity FROM qc_inspections WHERE inspection_type='incoming' AND COALESCE(reference_id,source_id)=? AND item_id=? AND status IN ('processed','closed') FOR UPDATE",{replacements:[grn_id,itemId],transaction:tx});
+        const [[returned]]=await req.orgDb.query("SELECT COALESCE(SUM(pri.quantity),0) quantity FROM purchase_return_items pri JOIN purchase_returns pr ON pr.id=pri.return_id WHERE pr.grn_id=? AND pri.item_id=? AND pr.status<>'cancelled' FOR UPDATE",{replacements:[grn_id,itemId],transaction:tx});
+        if(Number(returned.quantity)+returnQty>Number(accepted.quantity)) throw Object.assign(new Error('Return quantity exceeds QC-accepted receipt quantity'),{status:409,code:'INVALID_RETURN'});
       }
     }
     const returnId = uuid();
