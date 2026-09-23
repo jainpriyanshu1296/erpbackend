@@ -12,7 +12,7 @@ const SMART_QUERIES = [
     category: 'Sales',
     chartType: 'bar',
     xAxisKey: 'customer_name',
-    yAxisKey: 'total_revenue'
+    yAxisKey: 'total_revenue',
   },
   {
     id: 'items_below_reorder',
@@ -21,7 +21,7 @@ const SMART_QUERIES = [
     category: 'Inventory',
     chartType: 'bar',
     xAxisKey: 'item_name',
-    yAxisKey: 'deficit_qty'
+    yAxisKey: 'deficit_qty',
   },
   {
     id: 'vendor_rejection_ranking',
@@ -30,7 +30,7 @@ const SMART_QUERIES = [
     category: 'Quality',
     chartType: 'bar',
     xAxisKey: 'vendor_name',
-    yAxisKey: 'rejection_rate_percent'
+    yAxisKey: 'rejection_rate_percent',
   },
   {
     id: 'wo_average_delays',
@@ -39,7 +39,7 @@ const SMART_QUERIES = [
     category: 'Production',
     chartType: 'bar',
     xAxisKey: 'product_name',
-    yAxisKey: 'avg_delay_days'
+    yAxisKey: 'avg_delay_days',
   },
   {
     id: 'top_consumption_items',
@@ -48,7 +48,7 @@ const SMART_QUERIES = [
     category: 'Inventory',
     chartType: 'bar',
     xAxisKey: 'item_name',
-    yAxisKey: 'total_consumed_value'
+    yAxisKey: 'total_consumed_value',
   },
   {
     id: 'overdue_invoices_30_days',
@@ -57,7 +57,7 @@ const SMART_QUERIES = [
     category: 'Finance',
     chartType: 'bar',
     xAxisKey: 'invoice_number',
-    yAxisKey: 'balance_amount'
+    yAxisKey: 'balance_amount',
   },
   {
     id: 'machine_production_output',
@@ -66,7 +66,7 @@ const SMART_QUERIES = [
     category: 'Production',
     chartType: 'bar',
     xAxisKey: 'machine_name',
-    yAxisKey: 'total_produced'
+    yAxisKey: 'total_produced',
   },
   {
     id: 'hr_employee_absenteeism',
@@ -75,8 +75,8 @@ const SMART_QUERIES = [
     category: 'HR',
     chartType: 'bar',
     xAxisKey: 'employee_name',
-    yAxisKey: 'absent_days'
-  }
+    yAxisKey: 'absent_days',
+  },
 ];
 
 function getAvailableQueries() {
@@ -87,7 +87,8 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
   switch (queryId) {
     case 'top_customers_revenue': {
       const days = Number(params.days || 30);
-      const [rows] = await orgDb.query(`
+      const [rows] = await orgDb.query(
+        `
         SELECT 
           c.id as customer_id,
           c.company_name as customer_name,
@@ -101,12 +102,14 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
         GROUP BY c.id, c.company_name, c.customer_code
         ORDER BY total_revenue DESC
         LIMIT 15
-      `, { replacements: [days] });
+      `,
+        { replacements: [days] },
+      );
       return {
         query_id: queryId,
         title: 'Top Revenue Generating Customers',
         rows,
-        summary: `Top customer is ${rows[0]?.customer_name || 'N/A'} with ₹${rows[0]?.total_revenue || 0} revenue.`
+        summary: `Top customer is ${rows[0]?.customer_name || 'N/A'} with ₹${rows[0]?.total_revenue || 0} revenue.`,
       };
     }
 
@@ -138,7 +141,7 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
         query_id: queryId,
         title: 'Items Currently Below Reorder Level',
         rows,
-        summary: `${rows.length} item(s) are currently running below their designated safety reorder thresholds.`
+        summary: `${rows.length} item(s) are currently running below their designated safety reorder thresholds.`,
       };
     }
 
@@ -168,9 +171,9 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
         query_id: queryId,
         title: 'Vendor QC Rejection Rate Ranking',
         rows,
-        summary: rows.length 
+        summary: rows.length
           ? `Highest rejection rate observed from ${rows[0].vendor_name} (${rows[0].rejection_rate_percent}%).`
-          : 'No QC rejections recorded across vendors.'
+          : 'No QC rejections recorded across vendors.',
       };
     }
 
@@ -194,7 +197,7 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
         query_id: queryId,
         title: 'Work Order Turnaround & Shop Floor Delays',
         rows,
-        summary: `Average manufacturing turnaround across products is ${rows[0]?.avg_turnaround_days || 0} days.`
+        summary: `Average manufacturing turnaround across products is ${rows[0]?.avg_turnaround_days || 0} days.`,
       };
     }
 
@@ -219,7 +222,7 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
         query_id: queryId,
         title: 'Top 10 Consumed Raw Materials',
         rows,
-        summary: `Top consumed material is ${rows[0]?.item_name || 'N/A'} totaling ₹${rows[0]?.total_consumed_value || 0}.`
+        summary: `Top consumed material is ${rows[0]?.item_name || 'N/A'} totaling ₹${rows[0]?.total_consumed_value || 0}.`,
       };
     }
 
@@ -242,12 +245,15 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
         ORDER BY days_overdue DESC
         LIMIT 50
       `);
-      const totalOverdue = rows.reduce((s, r) => s + Number(r.balance_amount), 0);
+      const totalOverdue = rows.reduce(
+        (s, r) => s + Number(r.balance_amount),
+        0,
+      );
       return {
         query_id: queryId,
         title: 'Invoices Overdue by More than 30 Days',
         rows,
-        summary: `${rows.length} overdue invoices totaling ₹${Math.round(totalOverdue * 100) / 100} in locked working capital.`
+        summary: `${rows.length} overdue invoices totaling ₹${Math.round(totalOverdue * 100) / 100} in locked working capital.`,
       };
     }
 
@@ -275,7 +281,7 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
         query_id: queryId,
         title: 'Machine-wise Production Output This Month',
         rows,
-        summary: `Top performing machine is ${rows[0]?.machine_name || 'N/A'} with ${rows[0]?.total_produced || 0} units produced.`
+        summary: `Top performing machine is ${rows[0]?.machine_name || 'N/A'} with ${rows[0]?.total_produced || 0} units produced.`,
       };
     }
 
@@ -302,16 +308,18 @@ async function executeSmartQuery(orgDb, queryId, params = {}) {
         rows,
         summary: rows.length
           ? `Highest absence: ${rows[0].employee_name} (${rows[0].absent_days} days absent this month).`
-          : 'Zero unexcused absences recorded this month.'
+          : 'Zero unexcused absences recorded this month.',
       };
     }
 
     default:
-      throw Object.assign(new Error(`Unknown smart query id: ${queryId}`), { status: 400 });
+      throw Object.assign(new Error(`Unknown smart query id: ${queryId}`), {
+        status: 400,
+      });
   }
 }
 
 module.exports = {
   getAvailableQueries,
-  executeSmartQuery
+  executeSmartQuery,
 };

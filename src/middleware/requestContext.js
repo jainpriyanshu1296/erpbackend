@@ -9,8 +9,11 @@ module.exports = function requestContext(req, res, next) {
     if (res.statusCode >= 400) {
       req.apiError = {
         status: res.statusCode,
-        code: res.locals.errorCode || (res.statusCode >= 500 ? 'INTERNAL_ERROR' : 'HTTP_ERROR'),
-        message: res.locals.errorMessage || res.statusMessage || 'Request failed'
+        code:
+          res.locals.errorCode ||
+          (res.statusCode >= 500 ? 'INTERNAL_ERROR' : 'HTTP_ERROR'),
+        message:
+          res.locals.errorMessage || res.statusMessage || 'Request failed',
       };
     }
   });

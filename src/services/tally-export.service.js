@@ -236,5 +236,5 @@ function generateMastersXml(companyName, customers = [], vendors = []) {
 module.exports = {
   generateSalesXml,
   generatePurchaseXml,
-  generateMastersXml
+  generateMastersXml,
 };

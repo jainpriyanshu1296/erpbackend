@@ -12,14 +12,19 @@
 function createQrSvg(text, size = 180) {
   // Simple deterministic 25x25 QR matrix generation
   const modulesCount = 25;
-  const matrix = Array.from({ length: modulesCount }, () => Array(modulesCount).fill(0));
+  const matrix = Array.from({ length: modulesCount }, () =>
+    Array(modulesCount).fill(0),
+  );
 
   // 1. Finder patterns (7x7 at top-left, top-right, bottom-left)
   function drawFinder(startX, startY) {
     for (let r = 0; r < 7; r++) {
       for (let c = 0; c < 7; c++) {
         if (
-          r === 0 || r === 6 || c === 0 || c === 6 ||
+          r === 0 ||
+          r === 6 ||
+          c === 0 ||
+          c === 6 ||
           (r >= 2 && r <= 4 && c >= 2 && c <= 4)
         ) {
           matrix[startY + r][startX + c] = 1;
@@ -39,7 +44,8 @@ function createQrSvg(text, size = 180) {
   }
 
   // 3. Alignment pattern (5x5 around center-bottom right)
-  const alignX = 18, alignY = 18;
+  const alignX = 18,
+    alignY = 18;
   for (let r = -2; r <= 2; r++) {
     for (let c = -2; c <= 2; c++) {
       if (Math.abs(r) === 2 || Math.abs(c) === 2 || (r === 0 && c === 0)) {
@@ -51,7 +57,7 @@ function createQrSvg(text, size = 180) {
   // 4. Encode text hash into data payload area
   let hash = 0;
   for (let i = 0; i < text.length; i++) {
-    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash = (hash << 5) - hash + text.charCodeAt(i);
     hash |= 0;
   }
   hash = Math.abs(hash);
@@ -66,8 +72,9 @@ function createQrSvg(text, size = 180) {
       const isTiming = r === 6 || c === 6;
 
       if (!isFinderTL && !isFinderTR && !isFinderBL && !isAlign && !isTiming) {
-        const charCode = text.charCodeAt((r * modulesCount + c) % text.length) || 0;
-        const bit = ((charCode ^ hash) + (r * c)) % 3 === 0 ? 1 : 0;
+        const charCode =
+          text.charCodeAt((r * modulesCount + c) % text.length) || 0;
+        const bit = ((charCode ^ hash) + r * c) % 3 === 0 ? 1 : 0;
         matrix[r][c] = bit;
       }
     }
@@ -95,7 +102,7 @@ function generateItemQr(item) {
     type: 'ITEM',
     id: item.id,
     code: item.item_code,
-    name: item.item_name
+    name: item.item_name,
   });
 
   const svg = createQrSvg(payload, 140);
@@ -105,7 +112,7 @@ function generateItemQr(item) {
     item_name: item.item_name,
     qr_payload: payload,
     svg: svg,
-    label_format: '50x25mm'
+    label_format: '50x25mm',
   };
 }
 
@@ -118,7 +125,7 @@ function generateWorkOrderQr(wo) {
     id: wo.id,
     number: wo.wo_number,
     item_id: wo.finished_item_id,
-    planned_qty: wo.planned_qty
+    planned_qty: wo.planned_qty,
   });
 
   const svg = createQrSvg(payload, 160);
@@ -126,7 +133,7 @@ function generateWorkOrderQr(wo) {
     wo_id: wo.id,
     wo_number: wo.wo_number,
     qr_payload: payload,
-    svg: svg
+    svg: svg,
   };
 }
 
@@ -142,23 +149,30 @@ function verifyDispatchScan({ expectedItems = [], scannedCode }) {
     parsed = { code: scannedCode.trim() };
   }
 
-  const scannedIdentifier = (parsed.code || parsed.item_code || parsed.id || '').toUpperCase();
+  const scannedIdentifier = (
+    parsed.code ||
+    parsed.item_code ||
+    parsed.id ||
+    ''
+  ).toUpperCase();
   const matched = expectedItems.find(
-    it => (it.item_code || '').toUpperCase() === scannedIdentifier || (it.item_id || '').toUpperCase() === scannedIdentifier
+    (it) =>
+      (it.item_code || '').toUpperCase() === scannedIdentifier ||
+      (it.item_id || '').toUpperCase() === scannedIdentifier,
   );
 
   if (!matched) {
     return {
       verified: false,
       error: 'MISMATCH',
-      message: `Item [${scannedIdentifier}] does not belong to this Sales Order dispatch!`
+      message: `Item [${scannedIdentifier}] does not belong to this Sales Order dispatch!`,
     };
   }
 
   return {
     verified: true,
     matched_item: matched,
-    message: `Verified: ${matched.item_name || matched.item_code}`
+    message: `Verified: ${matched.item_name || matched.item_code}`,
   };
 }
 
@@ -166,5 +180,5 @@ module.exports = {
   createQrSvg,
   generateItemQr,
   generateWorkOrderQr,
-  verifyDispatchScan
+  verifyDispatchScan,
 };

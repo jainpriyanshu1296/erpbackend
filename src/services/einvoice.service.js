@@ -14,15 +14,44 @@ function getStateCode(gstin, stateName) {
     return gstin.substring(0, 2);
   }
   const stateCodeMap = {
-    'jammu and kashmir': '01', 'himachal pradesh': '02', 'punjab': '03', 'chandigarh': '04',
-    'uttarakhand': '05', 'haryana': '06', 'delhi': '07', 'rajasthan': '08', 'uttar pradesh': '09',
-    'bihar': '10', 'sikkim': '11', 'arunachal pradesh': '12', 'nagaland': '13', 'manipur': '14',
-    'mizoram': '15', 'tripura': '16', 'meghalaya': '17', 'assam': '18', 'west bengal': '19',
-    'jharkhand': '20', 'odisha': '21', 'chhattisgarh': '22', 'madhya pradesh': '23',
-    'gujarat': '24', 'daman and diu': '25', 'dadra and nagar haveli': '26', 'maharashtra': '27',
-    'andhra pradesh': '28', 'karnataka': '29', 'goa': '30', 'lakshadweep': '31',
-    'kerala': '32', 'tamil nadu': '33', 'puducherry': '34', 'andaman and nicobar': '35',
-    'telangana': '36', 'andhra pradesh (new)': '37', 'ladakh': '38'
+    'jammu and kashmir': '01',
+    'himachal pradesh': '02',
+    punjab: '03',
+    chandigarh: '04',
+    uttarakhand: '05',
+    haryana: '06',
+    delhi: '07',
+    rajasthan: '08',
+    'uttar pradesh': '09',
+    bihar: '10',
+    sikkim: '11',
+    'arunachal pradesh': '12',
+    nagaland: '13',
+    manipur: '14',
+    mizoram: '15',
+    tripura: '16',
+    meghalaya: '17',
+    assam: '18',
+    'west bengal': '19',
+    jharkhand: '20',
+    odisha: '21',
+    chhattisgarh: '22',
+    'madhya pradesh': '23',
+    gujarat: '24',
+    'daman and diu': '25',
+    'dadra and nagar haveli': '26',
+    maharashtra: '27',
+    'andhra pradesh': '28',
+    karnataka: '29',
+    goa: '30',
+    lakshadweep: '31',
+    kerala: '32',
+    'tamil nadu': '33',
+    puducherry: '34',
+    'andaman and nicobar': '35',
+    telangana: '36',
+    'andhra pradesh (new)': '37',
+    ladakh: '38',
   };
   return stateCodeMap[(stateName || '').toLowerCase().trim()] || '23';
 }
@@ -94,8 +123,8 @@ function buildNicPayload({ invoice, seller, buyer, lines }) {
       igst = Math.round(taxable * (gstRate / 100) * 100) / 100;
       totalIgst += igst;
     } else {
-      cgst = Math.round(taxable * ((gstRate / 2) / 100) * 100) / 100;
-      sgst = Math.round(taxable * ((gstRate / 2) / 100) * 100) / 100;
+      cgst = Math.round(taxable * (gstRate / 2 / 100) * 100) / 100;
+      sgst = Math.round(taxable * (gstRate / 2 / 100) * 100) / 100;
       totalCgst += cgst;
       totalSgst += sgst;
     }
@@ -105,7 +134,11 @@ function buildNicPayload({ invoice, seller, buyer, lines }) {
 
     return {
       SlNo: String(idx + 1),
-      PrdDesc: (line.description || line.item_name || 'Manufactured Item').substring(0, 100),
+      PrdDesc: (
+        line.description ||
+        line.item_name ||
+        'Manufactured Item'
+      ).substring(0, 100),
       IsServc: 'N',
       HsnCd: String(line.hsn_code || '84818090'),
       Qty: qty,
@@ -118,11 +151,12 @@ function buildNicPayload({ invoice, seller, buyer, lines }) {
       IgstAmt: igst,
       CgstAmt: cgst,
       SgstAmt: sgst,
-      TotItemVal: itemTotal
+      TotItemVal: itemTotal,
     };
   });
 
-  const totInvVal = Math.round((totalTaxable + totalCgst + totalSgst + totalIgst) * 100) / 100;
+  const totInvVal =
+    Math.round((totalTaxable + totalCgst + totalSgst + totalIgst) * 100) / 100;
 
   return {
     Version: '1.1',
@@ -131,21 +165,27 @@ function buildNicPayload({ invoice, seller, buyer, lines }) {
       SupTyp: buyerGstin === 'URP' ? 'B2C' : 'B2B',
       RegRev: 'N',
       EcmGstin: null,
-      IgstOnIntra: 'N'
+      IgstOnIntra: 'N',
     },
     DocDtls: {
       Typ: docType,
       No: docNum,
-      Dt: formatNicDate(invoice.invoice_date)
+      Dt: formatNicDate(invoice.invoice_date),
     },
     SellerDtls: {
       Gstin: sellerGstin,
-      LglNm: (seller.company_name || 'Manufacturing Enterprise').substring(0, 100),
-      TrdNm: (seller.company_name || 'Manufacturing Enterprise').substring(0, 100),
+      LglNm: (seller.company_name || 'Manufacturing Enterprise').substring(
+        0,
+        100,
+      ),
+      TrdNm: (seller.company_name || 'Manufacturing Enterprise').substring(
+        0,
+        100,
+      ),
       Addr1: (seller.address || 'Industrial Area').substring(0, 100),
       Loc: (seller.city || 'Indore').substring(0, 50),
       Pin: Number(seller.pin || 452015),
-      Stcd: sellerStcd
+      Stcd: sellerStcd,
     },
     BuyerDtls: {
       Gstin: buyerGstin,
@@ -154,7 +194,7 @@ function buildNicPayload({ invoice, seller, buyer, lines }) {
       Addr1: (buyer.address || 'Commercial Complex').substring(0, 100),
       Loc: (buyer.city || buyer.state || 'Indore').substring(0, 50),
       Pin: Number(buyer.pin || 452001),
-      Stcd: buyerStcd
+      Stcd: buyerStcd,
     },
     ItemList: itemList,
     ValDtls: {
@@ -163,8 +203,8 @@ function buildNicPayload({ invoice, seller, buyer, lines }) {
       SgstVal: totalSgst,
       IgstVal: totalIgst,
       RndOffAmt: 0,
-      TotInvVal: totInvVal
-    }
+      TotInvVal: totInvVal,
+    },
   };
 }
 
@@ -179,7 +219,8 @@ async function generateEinvoice({ invoice, seller, buyer, lines }) {
 
   // Real cryptographic SHA-256 IRN
   const irn = computeIrnHash(sellerGstin, finYear, 'INV', docNum);
-  const ackNo = String(Date.now()).slice(-10) + Math.floor(Math.random() * 1000);
+  const ackNo =
+    String(Date.now()).slice(-10) + Math.floor(Math.random() * 1000);
   const ackDate = new Date().toISOString().replace('T', ' ').substring(0, 19);
 
   // Official Signed QR Code packet structure specified by GSTN
@@ -193,7 +234,7 @@ async function generateEinvoice({ invoice, seller, buyer, lines }) {
     itemCnt: nicPayload.ItemList.length,
     mainHsnCode: nicPayload.ItemList[0]?.HsnCd || '84818090',
     irn: irn,
-    irnDt: ackDate
+    irnDt: ackDate,
   };
 
   // Base64 signed QR payload representation
@@ -209,12 +250,12 @@ async function generateEinvoice({ invoice, seller, buyer, lines }) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'client_id': process.env.NIC_CLIENT_ID || '',
-          'client_secret': process.env.NIC_CLIENT_SECRET || '',
-          'user_name': process.env.NIC_USERNAME || '',
-          'auth_token': authToken
+          client_id: process.env.NIC_CLIENT_ID || '',
+          client_secret: process.env.NIC_CLIENT_SECRET || '',
+          user_name: process.env.NIC_USERNAME || '',
+          auth_token: authToken,
         },
-        body: JSON.stringify(nicPayload)
+        body: JSON.stringify(nicPayload),
       });
       const data = await resp.json();
       if (data.Status === 1 && data.Data) {
@@ -224,11 +265,14 @@ async function generateEinvoice({ invoice, seller, buyer, lines }) {
           ack_no: String(data.Data.AckNo),
           ack_date: data.Data.AckDt,
           signed_qr_code: data.Data.SignedQRCode || signedQrCode,
-          payload: nicPayload
+          payload: nicPayload,
         };
       }
     } catch (err) {
-      console.warn('[NIC LIVE API FAILED, FALLING BACK TO CRYPTO SANDBOX]:', err.message);
+      console.warn(
+        '[NIC LIVE API FAILED, FALLING BACK TO CRYPTO SANDBOX]:',
+        err.message,
+      );
     }
   }
 
@@ -238,20 +282,24 @@ async function generateEinvoice({ invoice, seller, buyer, lines }) {
     ack_no: ackNo,
     ack_date: ackDate,
     signed_qr_code: signedQrCode,
-    payload: nicPayload
+    payload: nicPayload,
   };
 }
 
 /**
  * Cancel E-Invoice
  */
-async function cancelEinvoice({ irn, reason = '1', remark = 'Cancelled by user' }) {
+async function cancelEinvoice({
+  irn,
+  reason = '1',
+  remark = 'Cancelled by user',
+}) {
   return {
     status: 'cancelled',
     irn: irn,
     cancel_date: new Date().toISOString(),
     reason: reason,
-    remark: remark
+    remark: remark,
   };
 }
 
@@ -262,5 +310,5 @@ module.exports = {
   computeIrnHash,
   buildNicPayload,
   generateEinvoice,
-  cancelEinvoice
+  cancelEinvoice,
 };

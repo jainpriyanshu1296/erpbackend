@@ -15,8 +15,8 @@ const poolConfig = {
     max: 5,
     min: 0,
     acquire: 30000,
-    idle: 10000
-  }
+    idle: 10000,
+  },
 };
 
 /**
@@ -54,7 +54,7 @@ function getOrgDb(dbName) {
     dbName,
     process.env.MASTER_DB_USER || 'root',
     process.env.MASTER_DB_PASS || '',
-    poolConfig
+    poolConfig,
   );
 
   poolCache.set(dbName, { sequelize, lastAccessed: now });
@@ -62,15 +62,18 @@ function getOrgDb(dbName) {
 }
 
 // Periodic idle reaper (every 2 minutes)
-const reaper = setInterval(() => {
-  const cutoff = Date.now() - IDLE_TIMEOUT_MS;
-  for (const [db, entry] of poolCache.entries()) {
-    if (entry.lastAccessed < cutoff) {
-      poolCache.delete(db);
-      entry.sequelize.close().catch(() => {});
+const reaper = setInterval(
+  () => {
+    const cutoff = Date.now() - IDLE_TIMEOUT_MS;
+    for (const [db, entry] of poolCache.entries()) {
+      if (entry.lastAccessed < cutoff) {
+        poolCache.delete(db);
+        entry.sequelize.close().catch(() => {});
+      }
     }
-  }
-}, 2 * 60 * 1000);
+  },
+  2 * 60 * 1000,
+);
 
 if (reaper.unref) reaper.unref();
 

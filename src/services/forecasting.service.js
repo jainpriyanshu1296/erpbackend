@@ -22,7 +22,8 @@ async function getDemandForecast(orgDb, itemId = null) {
   }
 
   // 2. Aggregate monthly sales for the past 14 months
-  const [rows] = await orgDb.query(`
+  const [rows] = await orgDb.query(
+    `
     SELECT 
       soi.item_id,
       im.item_name,
@@ -38,7 +39,9 @@ async function getDemandForecast(orgDb, itemId = null) {
       ${itemFilter}
     GROUP BY soi.item_id, im.item_name, im.item_code, DATE_FORMAT(so.created_at, '%Y-%m'), YEAR(so.created_at), MONTH(so.created_at)
     ORDER BY yr ASC, mo ASC
-  `, { replacements });
+  `,
+    { replacements },
+  );
 
   // Group by item
   const itemMap = {};
@@ -48,7 +51,7 @@ async function getDemandForecast(orgDb, itemId = null) {
         item_id: r.item_id,
         item_name: r.item_name,
         item_code: r.item_code,
-        monthly: {}
+        monthly: {},
       };
     }
     itemMap[r.item_id].monthly[r.sales_month] = Number(r.total_qty);
@@ -72,20 +75,22 @@ async function getDemandForecast(orgDb, itemId = null) {
   }
 
   for (const item of Object.values(itemMap)) {
-    const salesSeries = pastMonths.map(m => item.monthly[m] || 0);
+    const salesSeries = pastMonths.map((m) => item.monthly[m] || 0);
 
     // Weighted Moving Average of last 3 months: (M1*1 + M2*2 + M3*3) / 6
     const m1 = salesSeries[salesSeries.length - 3] || 0;
     const m2 = salesSeries[salesSeries.length - 2] || 0;
     const m3 = salesSeries[salesSeries.length - 1] || 0;
-    const wma = Math.round(((m1 * 1) + (m2 * 2) + (m3 * 3)) / 6 * 10) / 10;
+    const wma = Math.round(((m1 * 1 + m2 * 2 + m3 * 3) / 6) * 10) / 10;
 
     // Annual monthly average
     const annualTotal = salesSeries.reduce((a, b) => a + b, 0);
     const annualAvg = annualTotal / (salesSeries.length || 1) || 1;
 
     // Standard deviation and Coefficient of Variation
-    const variance = salesSeries.reduce((sum, val) => sum + Math.pow(val - annualAvg, 2), 0) / salesSeries.length;
+    const variance =
+      salesSeries.reduce((sum, val) => sum + Math.pow(val - annualAvg, 2), 0) /
+      salesSeries.length;
     const stdDev = Math.sqrt(variance);
     const cv = annualAvg > 0 ? stdDev / annualAvg : 0;
     const confidence = cv < 0.35 ? 'High' : cv < 0.7 ? 'Medium' : 'Low';
@@ -95,13 +100,16 @@ async function getDemandForecast(orgDb, itemId = null) {
       const targetMonthNum = (now.getMonth() + 1 + idx + 1) % 12 || 12;
       const lastYearTargetStr = `${now.getFullYear() - 1}-${String(targetMonthNum).padStart(2, '0')}`;
       const lastYearSales = item.monthly[lastYearTargetStr] || annualAvg;
-      const seasonalIndex = annualAvg > 0 ? Math.max(0.5, Math.min(2.0, lastYearSales / annualAvg)) : 1.0;
+      const seasonalIndex =
+        annualAvg > 0
+          ? Math.max(0.5, Math.min(2.0, lastYearSales / annualAvg))
+          : 1.0;
       const projected = Math.round(wma * seasonalIndex);
 
       return {
         month: fm,
         predicted_qty: Math.max(0, projected),
-        seasonal_index: Math.round(seasonalIndex * 100) / 100
+        seasonal_index: Math.round(seasonalIndex * 100) / 100,
       };
     });
 
@@ -112,8 +120,11 @@ async function getDemandForecast(orgDb, itemId = null) {
       confidence,
       wma_baseline: wma,
       annual_avg: Math.round(annualAvg * 10) / 10,
-      historical_months: pastMonths.map((m, idx) => ({ month: m, actual_qty: salesSeries[idx] })),
-      forecast: forecastPoints
+      historical_months: pastMonths.map((m, idx) => ({
+        month: m,
+        actual_qty: salesSeries[idx],
+      })),
+      forecast: forecastPoints,
     });
   }
 
@@ -166,18 +177,24 @@ async function getSmartReorderSuggestions(orgDb) {
     GROUP BY poi.item_id
   `);
 
-  const leadTimeMap = Object.fromEntries(leadTimeRows.map(r => [r.item_id, Math.max(2, Math.round(r.avg_lead_days || 7))]));
+  const leadTimeMap = Object.fromEntries(
+    leadTimeRows.map((r) => [
+      r.item_id,
+      Math.max(2, Math.round(r.avg_lead_days || 7)),
+    ]),
+  );
 
   // Safety stock days
   const safetyDays = 3;
 
-  const suggestions = consumptionRows.map(row => {
+  const suggestions = consumptionRows.map((row) => {
     const consumed90 = Number(row.consumed_90_days || 0);
     const avgDailyConsumption = consumed90 / 90;
     const leadTime = leadTimeMap[row.item_id] || 7; // default 7 days lead time if no history
 
     // Formula: avg_daily * (lead_time + safety_days)
-    const suggestedReorder = Math.round(avgDailyConsumption * (leadTime + safetyDays) * 10) / 10;
+    const suggestedReorder =
+      Math.round(avgDailyConsumption * (leadTime + safetyDays) * 10) / 10;
     const currentReorder = Number(row.current_reorder_level || 0);
     const currentStock = Number(row.current_stock || 0);
 
@@ -194,10 +211,14 @@ async function getSmartReorderSuggestions(orgDb) {
       safety_days: safetyDays,
       current_reorder_level: currentReorder,
       suggested_reorder_level: suggestedReorder,
-      status: isCritical ? 'CRITICAL_STOCKOUT_RISK' : isDeficit ? 'UNDER_PROTECTED' : 'OPTIMAL',
-      message: isDeficit 
+      status: isCritical
+        ? 'CRITICAL_STOCKOUT_RISK'
+        : isDeficit
+          ? 'UNDER_PROTECTED'
+          : 'OPTIMAL',
+      message: isDeficit
         ? `${row.item_name}: Current reorder level (${currentReorder}) is below calculated requirement (${suggestedReorder}) based on 90-day usage.`
-        : 'Stock level within safe operating boundaries.'
+        : 'Stock level within safe operating boundaries.',
     };
   });
 
@@ -213,21 +234,25 @@ async function detectPriceAnomalies(orgDb, poItemData = null) {
   if (poItemData && Array.isArray(poItemData)) {
     const anomalies = [];
     for (const item of poItemData) {
-      const [rows] = await orgDb.query(`
+      const [rows] = await orgDb.query(
+        `
         SELECT AVG(poi.rate) as avg_rate, COUNT(*) as count
         FROM purchase_order_items poi
         JOIN purchase_orders po ON po.id = poi.order_id
         WHERE poi.item_id = ? AND po.vendor_id = ?
         ORDER BY po.created_at DESC
         LIMIT 5
-      `, { replacements: [item.item_id, item.vendor_id] });
+      `,
+        { replacements: [item.item_id, item.vendor_id] },
+      );
 
       const count = Number(rows[0]?.count || 0);
       const avgRate = Number(rows[0]?.avg_rate || 0);
       const currentRate = Number(item.rate || 0);
 
       if (count >= 1 && avgRate > 0) {
-        const deviation = Math.round(((currentRate - avgRate) / avgRate) * 1000) / 10;
+        const deviation =
+          Math.round(((currentRate - avgRate) / avgRate) * 1000) / 10;
         if (deviation > 15) {
           anomalies.push({
             item_id: item.item_id,
@@ -235,7 +260,7 @@ async function detectPriceAnomalies(orgDb, poItemData = null) {
             current_rate: currentRate,
             baseline_avg_rate: Math.round(avgRate * 100) / 100,
             deviation_percent: deviation,
-            warning: `Warning: Rate ₹${currentRate} is ${deviation}% above your 5-order historical average ₹${Math.round(avgRate * 100) / 100}`
+            warning: `Warning: Rate ₹${currentRate} is ${deviation}% above your 5-order historical average ₹${Math.round(avgRate * 100) / 100}`,
           });
         }
       }
@@ -296,19 +321,28 @@ async function getCashFlowForecast(orgDb) {
     GROUP BY horizon
   `);
 
-  const inflowMap = Object.fromEntries(inflows.map(r => [r.horizon, Number(r.total_inflow)]));
-  const outflowMap = Object.fromEntries(outflows.map(r => [r.horizon, Number(r.total_outflow)]));
+  const inflowMap = Object.fromEntries(
+    inflows.map((r) => [r.horizon, Number(r.total_inflow)]),
+  );
+  const outflowMap = Object.fromEntries(
+    outflows.map((r) => [r.horizon, Number(r.total_outflow)]),
+  );
 
   const horizons = ['30_days', '60_days', '90_days'];
-  const summary = horizons.map(h => {
+  const summary = horizons.map((h) => {
     const inf = inflowMap[h] || 0;
     const out = outflowMap[h] || 0;
     return {
       horizon: h,
-      label: h === '30_days' ? 'Next 30 Days' : h === '60_days' ? '31 - 60 Days' : '61 - 90 Days',
+      label:
+        h === '30_days'
+          ? 'Next 30 Days'
+          : h === '60_days'
+            ? '31 - 60 Days'
+            : '61 - 90 Days',
       expected_inflow: Math.round(inf * 100) / 100,
       expected_outflow: Math.round(out * 100) / 100,
-      net_cash_position: Math.round((inf - out) * 100) / 100
+      net_cash_position: Math.round((inf - out) * 100) / 100,
     };
   });
 
@@ -355,7 +389,7 @@ async function getProductionEfficiency(orgDb) {
 
   return {
     machine_efficiency: machineEfficiency,
-    work_orders_summary: woSummary
+    work_orders_summary: woSummary,
   };
 }
 
@@ -364,5 +398,5 @@ module.exports = {
   getSmartReorderSuggestions,
   detectPriceAnomalies,
   getCashFlowForecast,
-  getProductionEfficiency
+  getProductionEfficiency,
 };

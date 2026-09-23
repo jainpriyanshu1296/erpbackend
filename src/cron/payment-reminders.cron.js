@@ -5,7 +5,9 @@ const { getOrgDb } = require('../config/orgDb');
 
 async function runPaymentCheck() {
   try {
-    const [orgs] = await masterDb.query('SELECT db_name FROM organizations WHERE is_active=1 AND is_suspended=0');
+    const [orgs] = await masterDb.query(
+      'SELECT db_name FROM organizations WHERE is_active=1 AND is_suspended=0',
+    );
     for (const org of orgs) {
       try {
         const orgDb = getOrgDb(org.db_name);
@@ -20,31 +22,41 @@ async function runPaymentCheck() {
         `);
 
         for (const inv of overdueInvoices) {
-          const [exists] = await orgDb.query(`
+          const [exists] = await orgDb.query(
+            `
             SELECT id FROM notifications
             WHERE source = 'payment_reminder'
               AND title LIKE ?
               AND DATE(created_at) = CURDATE()
             LIMIT 1
-          `, { replacements: [`%${inv.invoice_number}%`] });
+          `,
+            { replacements: [`%${inv.invoice_number}%`] },
+          );
 
           if (!exists.length) {
-            await orgDb.query(`
+            await orgDb.query(
+              `
               INSERT INTO notifications (id, severity, title, description, source, is_read)
               VALUES (?, 'warning', ?, ?, 'payment_reminder', 0)
-            `, {
-              replacements: [
-                uuid(),
-                `Payment Overdue: Invoice ${inv.invoice_number}`,
-                `Customer ${inv.customer_name || 'N/A'} has pending balance ₹${inv.balance_amount} overdue since ${inv.due_date}.`
-              ]
-            });
+            `,
+              {
+                replacements: [
+                  uuid(),
+                  `Payment Overdue: Invoice ${inv.invoice_number}`,
+                  `Customer ${inv.customer_name || 'N/A'} has pending balance ₹${inv.balance_amount} overdue since ${inv.due_date}.`,
+                ],
+              },
+            );
           }
         }
 
         // Trigger WhatsApp Overdue Reminders to Customers
-        const { sendOverdueRemindersBatch } = require('../services/whatsapp.service');
-        await sendOverdueRemindersBatch(orgDb).catch(err => console.warn(`[WHATSAPP REMINDERS] ${org.db_name}:`, err.message));
+        const {
+          sendOverdueRemindersBatch,
+        } = require('../services/whatsapp.service');
+        await sendOverdueRemindersBatch(orgDb).catch((err) =>
+          console.warn(`[WHATSAPP REMINDERS] ${org.db_name}:`, err.message),
+        );
       } catch (orgErr) {
         console.error(`[CRON PAYMENT ERROR] ${org.db_name}:`, orgErr.message);
       }

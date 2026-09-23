@@ -16,7 +16,9 @@ async function checkExpiries() {
     `);
 
     for (const org of expiring) {
-      console.log(`[SUBSCRIPTION ALERT] Org ${org.company_name} (${org.slug}) plan ${org.plan} expiring soon.`);
+      console.log(
+        `[SUBSCRIPTION ALERT] Org ${org.company_name} (${org.slug}) plan ${org.plan} expiring soon.`,
+      );
     }
   } catch (err) {
     console.error('[CRON SUBSCRIPTION ERROR]:', err.message);

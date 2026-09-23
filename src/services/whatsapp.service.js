@@ -18,7 +18,9 @@ async function getWhatsAppSettings(orgDb) {
     )
   `);
 
-  const map = Object.fromEntries(rows.map(r => [r.setting_key, r.setting_value]));
+  const map = Object.fromEntries(
+    rows.map((r) => [r.setting_key, r.setting_value]),
+  );
 
   return {
     wati_endpoint: map.wati_endpoint || process.env.WATI_API_URL || '',
@@ -27,23 +29,31 @@ async function getWhatsAppSettings(orgDb) {
     whatsapp_invoice_enabled: map.whatsapp_invoice_enabled !== '0',
     whatsapp_overdue_enabled: map.whatsapp_overdue_enabled !== '0',
     whatsapp_low_stock_enabled: map.whatsapp_low_stock_enabled !== '0',
-    whatsapp_admin_phone: map.whatsapp_admin_phone || process.env.WHATSAPP_ADMIN_PHONE || ''
+    whatsapp_admin_phone:
+      map.whatsapp_admin_phone || process.env.WHATSAPP_ADMIN_PHONE || '',
   };
 }
 
 async function saveWhatsAppSettings(orgDb, settings = {}) {
   for (const [key, value] of Object.entries(settings)) {
-    const valStr = typeof value === 'boolean' ? (value ? '1' : '0') : String(value || '');
-    await orgDb.query(`
+    const valStr =
+      typeof value === 'boolean' ? (value ? '1' : '0') : String(value || '');
+    await orgDb.query(
+      `
       INSERT INTO company_settings (setting_key, setting_value)
       VALUES (?, ?)
       ON DUPLICATE KEY UPDATE setting_value = ?
-    `, { replacements: [key, valStr, valStr] });
+    `,
+      { replacements: [key, valStr, valStr] },
+    );
   }
   return getWhatsAppSettings(orgDb);
 }
 
-async function sendWhatsApp(orgDb, { to, templateName, parameters = [], mediaUrl = null }) {
+async function sendWhatsApp(
+  orgDb,
+  { to, templateName, parameters = [], mediaUrl = null },
+) {
   if (!to) return { status: 'skipped', reason: 'NO_PHONE_NUMBER' };
 
   let token = process.env.WATI_API_TOKEN || process.env.WHATSAPP_TOKEN;
@@ -57,7 +67,10 @@ async function sendWhatsApp(orgDb, { to, templateName, parameters = [], mediaUrl
 
   // Graceful fallback if no credentials are configured
   if (!token || !endpoint) {
-    console.log(`[WHATSAPP MOCK/SIMULATION] Template: ${templateName} | Recipient: ${to} | Params:`, JSON.stringify(parameters));
+    console.log(
+      `[WHATSAPP MOCK/SIMULATION] Template: ${templateName} | Recipient: ${to} | Params:`,
+      JSON.stringify(parameters),
+    );
     return { status: 'simulated', reason: 'SANDBOX_MODE', to, templateName };
   }
 
@@ -68,23 +81,28 @@ async function sendWhatsApp(orgDb, { to, templateName, parameters = [], mediaUrl
       broadcast_name: `broadcast_${Date.now()}`,
       receivers: [
         {
-          whatsappNumber: cleanPhone.startsWith('91') ? cleanPhone : `91${cleanPhone}`,
-          customParams: parameters
-        }
-      ]
+          whatsappNumber: cleanPhone.startsWith('91')
+            ? cleanPhone
+            : `91${cleanPhone}`,
+          customParams: parameters,
+        },
+      ],
     };
 
     if (mediaUrl) payload.media = { url: mediaUrl };
 
     const cleanEndpoint = endpoint.replace(/\/+$/, '');
-    const response = await fetch(`${cleanEndpoint}/api/v1/sendTemplateMessage`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
+    const response = await fetch(
+      `${cleanEndpoint}/api/v1/sendTemplateMessage`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload)
-    });
+    );
 
     const data = await response.json();
     return { status: 'sent', data };
@@ -101,12 +119,15 @@ async function sendPoToVendor(orgDb, poId) {
   const settings = await getWhatsAppSettings(orgDb);
   if (!settings.whatsapp_po_enabled) return { status: 'disabled' };
 
-  const [pos] = await orgDb.query(`
+  const [pos] = await orgDb.query(
+    `
     SELECT po.*, v.company_name as vendor_name, v.phone as vendor_phone
     FROM purchase_orders po
     JOIN vendors v ON v.id = po.vendor_id
     WHERE po.id = ?
-  `, { replacements: [poId] });
+  `,
+    { replacements: [poId] },
+  );
 
   if (!pos.length || !pos[0].vendor_phone) return { status: 'no_recipient' };
   const po = pos[0];
@@ -118,8 +139,13 @@ async function sendPoToVendor(orgDb, poId) {
       { name: 'vendor_name', value: po.vendor_name },
       { name: 'po_number', value: po.po_number },
       { name: 'amount', value: String(po.total_amount || 0) },
-      { name: 'delivery_date', value: po.delivery_date ? String(po.delivery_date).substring(0, 10) : 'Immediate' }
-    ]
+      {
+        name: 'delivery_date',
+        value: po.delivery_date
+          ? String(po.delivery_date).substring(0, 10)
+          : 'Immediate',
+      },
+    ],
   });
 }
 
@@ -130,14 +156,18 @@ async function sendInvoiceToCustomer(orgDb, invoiceId) {
   const settings = await getWhatsAppSettings(orgDb);
   if (!settings.whatsapp_invoice_enabled) return { status: 'disabled' };
 
-  const [invs] = await orgDb.query(`
+  const [invs] = await orgDb.query(
+    `
     SELECT i.*, c.company_name as customer_name, c.phone as customer_phone
     FROM invoices i
     JOIN customers c ON c.id = i.customer_id
     WHERE i.id = ?
-  `, { replacements: [invoiceId] });
+  `,
+    { replacements: [invoiceId] },
+  );
 
-  if (!invs.length || !invs[0].customer_phone) return { status: 'no_recipient' };
+  if (!invs.length || !invs[0].customer_phone)
+    return { status: 'no_recipient' };
   const inv = invs[0];
 
   return sendWhatsApp(orgDb, {
@@ -147,8 +177,11 @@ async function sendInvoiceToCustomer(orgDb, invoiceId) {
       { name: 'customer_name', value: inv.customer_name },
       { name: 'invoice_number', value: inv.invoice_number },
       { name: 'total_amount', value: String(inv.total_amount || 0) },
-      { name: 'invoice_date', value: String(inv.invoice_date || '').substring(0, 10) }
-    ]
+      {
+        name: 'invoice_date',
+        value: String(inv.invoice_date || '').substring(0, 10),
+      },
+    ],
   });
 }
 
@@ -182,8 +215,8 @@ async function sendOverdueRemindersBatch(orgDb) {
         { name: 'customer_name', value: inv.customer_name },
         { name: 'invoice_number', value: inv.invoice_number },
         { name: 'balance_amount', value: String(inv.balance_amount) },
-        { name: 'days_overdue', value: String(inv.days_overdue) }
-      ]
+        { name: 'days_overdue', value: String(inv.days_overdue) },
+      ],
     });
     results.push({ invoice_id: inv.id, result: res });
   }
@@ -211,7 +244,7 @@ async function sendLowStockAlertToOwner(orgDb) {
   if (!shortItems.length) return { status: 'no_low_stock' };
 
   const itemListText = shortItems
-    .map(i => `${i.item_name}: ${i.current_stock}/${i.reorder_level}`)
+    .map((i) => `${i.item_name}: ${i.current_stock}/${i.reorder_level}`)
     .join(', ');
 
   return sendWhatsApp(orgDb, {
@@ -219,8 +252,8 @@ async function sendLowStockAlertToOwner(orgDb) {
     templateName: 'daily_low_stock_summary',
     parameters: [
       { name: 'item_count', value: String(shortItems.length) },
-      { name: 'items_summary', value: itemListText.substring(0, 200) }
-    ]
+      { name: 'items_summary', value: itemListText.substring(0, 200) },
+    ],
   });
 }
 
@@ -231,5 +264,5 @@ module.exports = {
   sendPoToVendor,
   sendInvoiceToCustomer,
   sendOverdueRemindersBatch,
-  sendLowStockAlertToOwner
+  sendLowStockAlertToOwner,
 };
