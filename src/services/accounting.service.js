@@ -79,7 +79,7 @@ async function postInvoiceEffect(db, invoiceId, userId, transaction) {
   const [rows] = await db.query('SELECT * FROM invoices WHERE id=? FOR UPDATE', { replacements: [invoiceId], transaction });
   if (!rows.length) throw Object.assign(new Error('Invoice not found'), { status: 404, code: 'NOT_FOUND' });
   const invoice = rows[0];
-  const [items] = await db.query('SELECT taxable,cgst,sgst,igst,total FROM invoice_items WHERE invoice_id=?', { replacements: [invoiceId], transaction });
+  const [items] = await db.query('SELECT taxable,cgst,sgst,igst,total FROM invoice_item_lines WHERE invoice_id=?', { replacements: [invoiceId], transaction });
   const totals = items.reduce((a, x) => ({ taxable: a.taxable + Number(x.taxable || 0), cgst: a.cgst + Number(x.cgst || 0), sgst: a.sgst + Number(x.sgst || 0), igst: a.igst + Number(x.igst || 0) }), { taxable: 0, cgst: 0, sgst: 0, igst: 0 });
   if (!items.length) totals.taxable = Number(invoice.total_amount || 0);
   const ar = await account(db, '1100', transaction), sales = await account(db, '4000', transaction);

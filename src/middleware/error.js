@@ -6,5 +6,6 @@ module.exports = (err, req, res, next) => {
     logApiError(req, res, err);
   }
   if (res.headersSent) return next(err);
-  return fail(res, err.status || 500, err.code || 'INTERNAL_ERROR', process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message);
+  const status = err.status || 500;
+  return fail(res, status, err.code || 'INTERNAL_ERROR', process.env.NODE_ENV === 'production' && status >= 500 ? 'Internal server error' : err.message, status < 500 ? err.details : undefined);
 };

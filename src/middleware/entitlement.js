@@ -3,6 +3,7 @@ const { fail, asyncHandler } = require('../utils/response');
 
 // Central subscription check. Individual modules may add a module key check.
 const entitlement = asyncHandler(async (req, res, next) => {
+  if (['superadmin', 'support'].includes(req.user?.role) && String(req.originalUrl || '').startsWith('/api/v1/admin/')) return next();
   const [rows] = await masterDb.query(
     `SELECT s.status, s.expires_at, o.trial_ends_at AS org_trial_ends_at
        FROM subscriptions s RIGHT JOIN organizations o ON o.id=s.org_id

@@ -8,8 +8,8 @@ function buildReq({ stockCurrent = 200 } = {}) {
       const text = String(sql).toLowerCase();
       if (text.includes('select coalesce(max(snapshot_version)')) return [{ next_version: 0 }];
       if (text.includes('select * from quality_ncrs')) return [[{ id: 'ncr-1', status: 'open' }]];
-      if (text.includes('select * from qc_inspections')) return [[{ id: 'insp-1', item_id: 'item-1', inspected_qty: 20, accepted_qty: 18, rejected_qty: 2 }]];
-      if (text.includes('select current_qty from stock_summary')) return [[{ current_qty: stockCurrent }]];
+      if (text.includes('select * from qc_inspections')) return [[{ id: 'insp-1', status:'processed', item_id: 'item-1', inspected_qty: 20, accepted_qty: 18, rejected_qty: 2 }]];
+      if (text.includes('select current_qty,avg_rate from stock_summary')) return [[{ current_qty: stockCurrent,avg_rate:5 }]];
       if (text.includes('select * from attendance_corrections')) return [[{ id: 'corr-1', employee_id: 'emp-1', attendance_date: '2026-09-18', proposed_status: 'present', status: 'pending', requested_by: 'req-1' }]];
       if (text.includes('select * from leave_requests')) return [[]];
       if (text.includes('select holiday_date from leave_holidays')) return [[{ holiday_date: '2026-09-19' }]];
@@ -47,14 +47,14 @@ test('disposition stock effects reduce summary and close inspection', async () =
   const result = await service.disposeInspection(req, {
     inspection_id: 'insp-1',
     disposition: 'quarantine',
-    quantity: 12,
+    quantity: 2,
     warehouse_id: 'wh-1',
     item_id: 'item-1'
   });
 
   assert.equal(result.status, 'closed');
   assert.equal(result.stock_effect.movement_type, 'out');
-  assert.equal(result.stock_effect.balance_qty, 38);
+  assert.equal(result.stock_effect.balance_qty, 48);
 });
 
 test('NCR transitions accept lifecycle updates and keep audit metadata', async () => {

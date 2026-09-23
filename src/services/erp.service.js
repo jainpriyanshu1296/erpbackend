@@ -16,13 +16,23 @@ async function postStockAdjustment(db, input, userId) {
   const tx = await db.transaction();
   try {
     const id = input.id || uuid();
-    const number = input.adjustment_number || await nextNumber(db, 'stock_adjustment', 'ADJ-', 5, tx);
-    await db.query('INSERT INTO stock_adjustments(id,adjustment_number,warehouse_id,reason,created_by,status) VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE status=?', {
-      replacements: [id, number, input.warehouse_id, input.reason || null, userId, 'posted', 'posted'], transaction: tx
+    const [[existing]] = await db.query('SELECT * FROM stock_adjustments WHERE id=? FOR UPDATE',{replacements:[id],transaction:tx});
+    if (existing?.status === 'posted') { await tx.commit(); return {id,status:'posted',already_applied:true}; }
+    if (existing && existing.status !== 'draft') throw Object.assign(new Error('Only draft adjustments can be posted'),{status:409});
+    if (existing) {
+      const [items] = await db.query('SELECT * FROM stock_adjustment_items WHERE adjustment_id=? ORDER BY item_id,id',{replacements:[id],transaction:tx});
+      input = {...existing,items};
+    }
+    if (!input.warehouse_id || !Array.isArray(input.items) || !input.items.length || !input.reason) throw Object.assign(new Error('Warehouse, reason and adjustment items are required'),{status:400});
+    const number = existing?.adjustment_number || input.adjustment_number || await nextNumber(db, 'stock_adjustment', 'ADJ-', 5, tx);
+    if (!existing) await db.query('INSERT INTO stock_adjustments(id,adjustment_number,warehouse_id,reason,created_by,status) VALUES(?,?,?,?,?,?)', {
+      replacements: [id, number, input.warehouse_id, input.reason, userId, 'draft'], transaction: tx
     });
-    for (const item of input.items || []) {
+    for (const item of input.items) {
       const qty = Number(item.quantity); if (!item.item_id || !Number.isFinite(qty) || qty <= 0) throw Object.assign(new Error('Invalid stock adjustment item'), { status: 400, code: 'VALIDATION_ERROR' });
-      const inQty = item.direction === 'out' ? 0 : qty, outQty = item.direction === 'out' ? qty : 0;
+      if (!['in','out','increase','decrease'].includes(item.direction) || !Number.isFinite(Number(item.rate || 0)) || Number(item.rate || 0)<0) throw Object.assign(new Error('Invalid direction or rate'),{status:400});
+      const outgoing = ['out','decrease'].includes(item.direction);
+      const inQty = outgoing ? 0 : qty, outQty = outgoing ? qty : 0;
       const [summary] = await db.query('SELECT current_qty,avg_rate FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE', { replacements: [item.item_id, input.warehouse_id], transaction: tx });
       const current = Number(summary[0]?.current_qty || 0); if (current - outQty < 0) throw Object.assign(new Error('Insufficient stock'), { status: 409, code: 'INSUFFICIENT_STOCK' });
       const next = current + inQty - outQty;
@@ -42,8 +52,9 @@ async function recordInvoicePayment(db, invoiceId, amount, details, userId) {
       const [existing] = await db.query('SELECT result_json FROM operation_keys WHERE operation_key=? FOR UPDATE', { replacements: [operationKey], transaction: tx });
       if (existing.length) { await tx.commit(); return JSON.parse(existing[0].result_json); }
     }
-    const [rows] = await db.query('SELECT total_amount,balance_amount FROM invoices WHERE id=? FOR UPDATE', { replacements: [invoiceId], transaction: tx });
+    const [rows] = await db.query('SELECT total_amount,balance_amount,status FROM invoices WHERE id=? FOR UPDATE', { replacements: [invoiceId], transaction: tx });
     if (!rows.length || !Number.isFinite(Number(amount)) || Number(amount) <= 0) throw Object.assign(new Error('Invoice or amount is invalid'), { status: 400, code: 'VALIDATION_ERROR' });
+    if (!['issued','part_paid'].includes(rows[0].status)) throw Object.assign(new Error('Issue the invoice before recording payment'),{status:409,code:'INVALID_INVOICE_STATE'});
     const balance = Number(rows[0].balance_amount ?? rows[0].total_amount); if (Number(amount) > balance) throw Object.assign(new Error('Payment exceeds invoice balance'), { status: 409, code: 'OVERPAYMENT' });
     const paymentId = uuid();
     await db.query('INSERT INTO invoice_payments(id,invoice_id,amount,method,reference,created_by) VALUES(?,?,?,?,?,?)', { replacements: [paymentId, invoiceId, amount, details?.method || 'bank', details?.reference || null, userId], transaction: tx });

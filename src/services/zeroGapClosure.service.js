@@ -21,14 +21,56 @@ async function audit(db, userId, action, entityType, entityId, data, transaction
 }
 async function write(db, table, data, userId, operationKey) {
   assert(TABLES[table], 'Unsupported resource');
+  data={...data};
+  const initial={count:'draft',purchaseReturn:'draft',salesReturn:'draft',creditNote:'draft',approval:'pending',serial:'available'};
+  if(initial[table]) {assert(!data.status || data.status===initial[table],'Records must be created in their initial state');data.status=initial[table];}
+  if(table==='batch') {assert(data.quantity===undefined || Number(data.quantity)===0,'Batch quantities are maintained only by stock movements');data.quantity=0;assert(data.batch_no,'Batch number is required');}
+  if(table==='serial') assert(data.serial_no,'Serial number is required');
+  if(table==='count') assert(data.count_number && data.warehouse_id,'Count number and warehouse are required');
   if (['batch','serial'].includes(table)) assert(data.item_id, 'item_id is required');
   if (['batch','serial','purchaseReturnLine','countLine','allocation','output','downtime','scrap'].includes(table)) {
     const quantity = data.quantity ?? data.allocated_amount ?? data.counted_qty ?? data.minutes;
-    if (quantity !== undefined) assert(Number(quantity) > 0, 'quantity must be greater than zero');
+    if (quantity !== undefined) assert(Number.isFinite(Number(quantity)) && (['countLine','batch'].includes(table)?Number(quantity)>=0:Number(quantity)>0), 'quantity must be a finite valid number');
   }
   const tx = await db.transaction();
   try {
     let result;
+    if(table==='rfqSupplier') {
+      const [[rfq]]=await db.query('SELECT id,status FROM rfqs WHERE id=? FOR UPDATE',{replacements:[data.rfq_id || null],transaction:tx});
+      const [[vendor]]=await db.query('SELECT id FROM vendors WHERE id=? AND is_active=1',{replacements:[data.supplier_id || null],transaction:tx});
+      assert(rfq && ['draft','requested'].includes(rfq.status) && vendor,'Choose an active vendor and open RFQ');
+      data.status='invited';
+    }
+    if(table==='quotationLine') {
+      const [[source]]=await db.query('SELECT s.rfq_id,r.status FROM rfq_suppliers s JOIN rfqs r ON r.id=s.rfq_id WHERE s.id=? FOR UPDATE',{replacements:[data.rfq_supplier_id || null],transaction:tx});
+      assert(source && ['requested','quoted'].includes(source.status),'RFQ must be requested or quoted');
+      const [[item]]=await db.query('SELECT quantity FROM rfq_items WHERE rfq_id=? AND item_id=?',{replacements:[source.rfq_id,data.item_id || null],transaction:tx});
+      assert(item && Number(data.quantity)===Number(item.quantity),'Quote the requested item and quantity');
+      assert(Number.isFinite(Number(data.unit_price)) && Number(data.unit_price)>=0 && Number.isFinite(Number(data.tax_rate || 0)) && Number(data.tax_rate || 0)>=0 && Number(data.tax_rate || 0)<=100,'Invalid price or tax rate');
+      data.is_selected=0;
+    }
+    if (['batch','serial','countLine','output','scrap'].includes(table)) {
+      const [[item]]=await db.query('SELECT id FROM item_master WHERE id=? AND is_active=1',{replacements:[data.item_id || null],transaction:tx});
+      assert(item,'An active Item Master record is required');
+    }
+    if (data.warehouse_id) {
+      const [[warehouse]]=await db.query('SELECT id FROM warehouses WHERE id=? AND is_active=1',{replacements:[data.warehouse_id],transaction:tx});
+      assert(warehouse,'An active warehouse is required');
+    }
+    if (['output','scrap','downtime'].includes(table)) {
+      const [[order]]=await db.query('SELECT * FROM production_orders WHERE id=? FOR UPDATE',{replacements:[data.production_order_id || null],transaction:tx});
+      assert(order && ['released','in_progress'].includes(order.status),'A released production order is required');
+      if(table==='output') assert(order.item_id===data.item_id && Number(data.quantity)<=Number(order.planned_qty),'Output must match the production item and planned quantity');
+    }
+    if(table==='countLine') {
+      const [[count]]=await db.query('SELECT * FROM physical_counts WHERE id=? FOR UPDATE',{replacements:[data.count_id || null],transaction:tx});
+      assert(count && ['draft','open'].includes(count.status),'Lines can only be recorded on a draft or open count');
+      assert(data.counted_qty!==undefined && Number.isFinite(Number(data.counted_qty)) && Number(data.counted_qty)>=0,'Counted quantity must be non-negative');
+      const [[existing]]=await db.query('SELECT id FROM physical_count_lines WHERE count_id=? AND item_id=?',{replacements:[data.count_id,data.item_id],transaction:tx});
+      assert(!existing,'Item is already recorded in this count');
+      const [[stock]]=await db.query('SELECT current_qty FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE',{replacements:[data.item_id,count.warehouse_id],transaction:tx});
+      data.system_qty=Number(stock?.current_qty || 0);
+    }
     if (operationKey) {
       const [existing] = await db.query('SELECT result_json FROM operation_keys WHERE operation_key=? FOR UPDATE', { replacements: [operationKey], transaction: tx });
       if (existing.length) { await tx.commit(); return JSON.parse(existing[0].result_json); }
@@ -45,12 +87,16 @@ async function write(db, table, data, userId, operationKey) {
 }
 async function transition(db, table, id, status, userId) {
   assert(['approval','count','purchaseReturn','salesReturn','creditNote'].includes(table), 'Transition is not supported');
-  const statusMap = { approval: ['pending','approved','rejected','cancelled'], count: ['draft','open','submitted','approved','posted','cancelled'], purchaseReturn: ['draft','cancelled'], salesReturn: ['draft','cancelled'], creditNote: ['draft','issued','cancelled'] };
+  const statusMap = { approval: ['pending','approved','rejected','cancelled'], count: ['draft','open','submitted','approved','cancelled'], purchaseReturn: ['draft','cancelled'], salesReturn: ['draft','cancelled'], creditNote: ['draft','cancelled'] };
   assert(statusMap[table].includes(status), 'Invalid status');
   const tx = await db.transaction();
   try {
     const [rows] = await db.query(`SELECT status FROM ${TABLES[table]} WHERE id=? FOR UPDATE`, { replacements: [id], transaction: tx });
     assert(rows.length, 'Record not found');
+    if (table==='count') {
+      const allowed={draft:['open','cancelled'],open:['submitted','cancelled'],submitted:['approved','cancelled'],approved:[],posted:[],cancelled:[]};
+      assert((allowed[rows[0].status] || []).includes(status),'Invalid physical count transition');
+    } else assert(!['posted','issued','cancelled','rejected','approved'].includes(rows[0].status),'Terminal records cannot be changed');
     if (table === 'approval') {
       const [steps] = await db.query('SELECT * FROM approval_steps WHERE approval_id=? ORDER BY step_no FOR UPDATE', { replacements: [id], transaction: tx });
       if (status === 'approved') {
@@ -122,10 +168,11 @@ async function applyStockEffect(db, { operationKey, referenceType, referenceId, 
     const oldValue = Number(stockRows[0]?.total_value || 0);
     const value = qty * Number(rate || stockRows[0]?.avg_rate || 0);
     const totalValue = direction === 'out' ? oldValue - value : oldValue + value;
+    const averageRate = direction === 'in' && next > 0 ? totalValue / next : Number(stockRows[0]?.avg_rate || rate || 0);
     await db.query(
       `INSERT INTO stock_summary(item_id,warehouse_id,current_qty,avg_rate,total_value)
-       VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE current_qty=?,avg_rate=IF(?=0,avg_rate,?/?),total_value=?`,
-      { replacements: [itemId, warehouseId, next, rate || 0, totalValue, next, next, totalValue, next, totalValue], transaction: tx }
+       VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE current_qty=?,avg_rate=?,total_value=?`,
+      { replacements: [itemId, warehouseId, next, averageRate, totalValue, next, averageRate, totalValue], transaction: tx }
     );
     await db.query(
       'INSERT INTO stock_ledger(id,item_id,warehouse_id,transaction_type,reference_type,reference_id,qty_in,qty_out,balance_qty,rate,amount,created_by,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -135,34 +182,6 @@ async function applyStockEffect(db, { operationKey, referenceType, referenceId, 
     if (ownsTransaction) await tx.commit();
     return { operation_key: operationKey, quantity: qty, balance_qty: next, already_applied: false };
   } catch (error) { if (ownsTransaction) await tx.rollback(); throw error; }
-}
-
-async function postReturn(db, type, id, userId, warehouseId) {
-  const table = type === 'purchase' ? 'purchase_returns' : 'sales_returns';
-  const lineTable = type === 'purchase' ? 'purchase_return_lines' : 'sales_return_lines';
-  const direction = type === 'purchase' ? 'out' : 'in';
-  const tx = await db.transaction();
-  try {
-    const [returns] = await db.query(`SELECT * FROM ${table} WHERE id=? FOR UPDATE`, { replacements: [id], transaction: tx });
-    assert(returns.length, 'Return not found');
-    assert(returns[0].status === 'draft', 'Only draft returns can be posted');
-    warehouseId = warehouseId || returns[0].warehouse_id;
-    assert(warehouseId, 'warehouse_id is required');
-    const [lines] = await db.query(`SELECT * FROM ${lineTable} WHERE ${type === 'purchase' ? 'return_id' : 'return_id'}=?`, { replacements: [id], transaction: tx });
-    assert(lines.length, 'Return must contain at least one line');
-    for (const line of lines) {
-      await applyStockEffect(db, { operationKey: `${type}-return:${id}:${line.id}`, referenceType: `${type}_return`, referenceId: id, itemId: line.item_id, warehouseId, quantity: line.quantity, rate: line.unit_price, direction, userId, batchId: line.batch_id, serialId: line.serial_id, transaction: tx });
-    }
-    const total = Number(returns[0].total_amount || lines.reduce((sum, line) => sum + Number(line.quantity || 0) * Number(line.unit_price || 0), 0));
-    await postReturnEffect(db, type, id, total, userId, tx, {
-      taxable: returns[0].taxable_amount || total, cgst: returns[0].cgst || 0,
-      sgst: returns[0].sgst || 0, igst: returns[0].igst || 0
-    });
-    await db.query(`UPDATE ${table} SET status='posted' WHERE id=? AND status='draft'`, { replacements: [id], transaction: tx });
-    await audit(db, userId, type, 'return_posted', type === 'purchase' ? 'purchase_return' : 'sales_return', id, { line_count: lines.length }, tx);
-    await tx.commit();
-    return { id, status: 'posted', line_count: lines.length };
-  } catch (error) { await tx.rollback(); throw error; }
 }
 
 async function allocatePayment(db, paymentId, invoiceId, amount, userId) {
@@ -190,23 +209,34 @@ async function postPhysicalCount(db, countId, userId) {
   try {
     const [counts] = await db.query('SELECT * FROM physical_counts WHERE id=? FOR UPDATE', { replacements: [countId], transaction: tx });
     assert(counts.length, 'Physical count not found');
+    if(counts[0].status==='posted'){await tx.commit();return {id:countId,status:'posted',already_applied:true};}
     assert(['approved', 'submitted'].includes(counts[0].status), 'Count must be submitted or approved before posting');
     const [lines] = await db.query('SELECT * FROM physical_count_lines WHERE count_id=? FOR UPDATE', { replacements: [countId], transaction: tx });
     assert(lines.length && lines.every(line => line.counted_qty !== null), 'All physical count lines must be counted');
     for (const line of lines) {
+      assert(Number.isFinite(Number(line.counted_qty)) && Number(line.counted_qty)>=0,'Counted quantity must be non-negative');
+      const [[stock]]=await db.query('SELECT current_qty FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE',{replacements:[line.item_id,counts[0].warehouse_id],transaction:tx});
+      assert(Number(stock?.current_qty || 0)===Number(line.system_qty),'Stock changed after counting; cancel this count and recount before posting');
       const variance = Number(line.counted_qty) - Number(line.system_qty);
       if (!variance) continue;
       await applyStockEffect(db, { operationKey: `physical-count:${countId}:${line.id}`, referenceType: 'physical_count', referenceId: countId, itemId: line.item_id, warehouseId: counts[0].warehouse_id, quantity: Math.abs(variance), rate: 0, direction: variance > 0 ? 'in' : 'out', userId, transaction: tx });
     }
 
     await db.query("UPDATE physical_counts SET status='posted',posted_at=NOW(),approved_by=COALESCE(approved_by,?) WHERE id=?", { replacements: [userId || null, countId], transaction: tx });
-    await audit(db, userId, 'inventory', 'physical_count_posted', 'physical_count', countId, { lines: lines.length }, tx);
+    await audit(db, userId, 'physical_count_posted', 'physical_count', countId, { lines: lines.length }, tx);
     await tx.commit();
     return { id: countId, status: 'posted' };
   } catch (error) { await tx.rollback(); throw error; }
 }
 
 async function postProductionEffect(db, kind, id, userId, warehouseId) {
+  if (kind === 'output') {
+    const [[output]]=await db.query('SELECT * FROM production_outputs WHERE id=?',{replacements:[id]});
+    assert(output,'Production output not found');
+    const [[link]]=await db.query("SELECT target_id FROM related_documents WHERE source_type='production_order' AND source_id=? AND target_type='work_order' AND relation='execution'",{replacements:[output.production_order_id]});
+    assert(link,'Release the production order and issue its materials before posting output');
+    return require('./salesProduction.service').completeWorkOrder(db,link.target_id,warehouseId || output.warehouse_id,userId,id);
+  }
   const table = kind === 'output' ? 'production_outputs' : 'production_scrap';
   const direction = kind === 'output' ? 'in' : 'out';
   const tx = await db.transaction();
@@ -303,9 +333,11 @@ async function processExport(db, id, userId) {
 async function selectQuotation(db, lineId, userId) {
   const tx = await db.transaction();
   try {
-    const [line] = await db.query('SELECT rfq_supplier_id,item_id FROM rfq_quotation_lines WHERE id=? FOR UPDATE', { replacements: [lineId], transaction: tx });
+    const [line] = await db.query('SELECT q.rfq_supplier_id,q.item_id,s.rfq_id FROM rfq_quotation_lines q JOIN rfq_suppliers s ON s.id=q.rfq_supplier_id WHERE q.id=? FOR UPDATE', { replacements: [lineId], transaction: tx });
     assert(line.length, 'Quotation line not found');
-    await db.query('UPDATE rfq_quotation_lines SET is_selected=0 WHERE rfq_supplier_id=? AND item_id=?', { replacements: [line[0].rfq_supplier_id, line[0].item_id], transaction: tx });
+    const [[rfq]]=await db.query('SELECT status FROM rfqs WHERE id=? FOR UPDATE',{replacements:[line[0].rfq_id],transaction:tx});
+    assert(rfq && ['quoted','compared','selected'].includes(rfq.status),'Compare quotations before selecting a vendor');
+    await db.query('UPDATE rfq_quotation_lines q JOIN rfq_suppliers s ON s.id=q.rfq_supplier_id SET q.is_selected=0 WHERE s.rfq_id=? AND q.item_id=?', { replacements: [line[0].rfq_id, line[0].item_id], transaction: tx });
     await db.query('UPDATE rfq_quotation_lines SET is_selected=1 WHERE id=?', { replacements: [lineId], transaction: tx });
     await audit(db, userId, 'quotation.selected', 'rfq_quotation_line', lineId, line[0], tx);
     await tx.commit(); return { id: lineId, selected: true };
@@ -320,20 +352,8 @@ async function compareQuotations(db, rfqId) {
   );
   return rows;
 }
-async function matchPurchaseReturn(db, id, invoiceId, userId) {
-  assert(invoiceId, 'purchase_invoice_id is required');
-  const tx = await db.transaction();
-  try {
-    const [rows] = await db.query('SELECT id,status FROM purchase_returns WHERE id=? FOR UPDATE', { replacements: [id], transaction: tx });
-    assert(rows.length, 'Purchase return not found');
-    assert(rows[0].status === 'draft', 'Only draft returns can be matched');
-    await db.query('UPDATE purchase_returns SET purchase_invoice_id=? WHERE id=?', { replacements: [invoiceId, id], transaction: tx });
-    await audit(db, userId, 'matched', 'purchase_return', id, { purchase_invoice_id: invoiceId }, tx);
-    await tx.commit(); return { id, purchase_invoice_id: invoiceId };
-  } catch (e) { await tx.rollback(); throw e; }
-}
 module.exports = {
-  TABLES, assert, audit, write, transition, actOnApproval, applyStockEffect, postReturn,
+  TABLES, assert, audit, write, transition, actOnApproval, applyStockEffect,
   allocatePayment, postPhysicalCount, postProductionEffect, issueCreditNote, processImport, processExport, selectQuotation,
-  compareQuotations, matchPurchaseReturn
+  compareQuotations
 };

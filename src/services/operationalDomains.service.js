@@ -44,23 +44,18 @@ function range(params = {}) {
   return [start, end];
 }
 async function createNcr(req, body) {
-  if (!body.ncr_number || !body.description) throw error('ncr_number and description are required');
-  const id = uuid();
-  await req.orgDb.query('INSERT INTO quality_ncrs(id,ncr_number,inspection_id,severity,description,status,owner_id) VALUES(?,?,?,?,?,?,?)', { replacements: [id, body.ncr_number, body.inspection_id || null, body.severity || 'major', body.description, 'open', req.user?.sub || null] });
-  return { id, status: 'open' };
-}
-async function disposeInspection(req, body) {
-  if (!body.inspection_id || !body.disposition || Number(body.quantity) <= 0) throw error('inspection_id, disposition and positive quantity are required');
-  if (body.batch_id && body.serial_id) throw error('Disposition must target a batch or serial, not both');
-  if (body.serial_id && Number(body.quantity) !== 1) throw error('Serial disposition quantity must be exactly one');
-  const tx = await req.orgDb.transaction(); const id = uuid(); const effect = `${body.inspection_id}:${body.disposition}:${body.quantity}`;
+  if (!body.ncr_number || !body.description || !body.inspection_id || !['minor','major','critical'].includes(body.severity || 'major')) throw error('inspection_id, ncr_number, description and valid severity are required');
+  const tx=await req.orgDb.transaction();
   try {
-    const [existing] = await req.orgDb.query('SELECT id,effect_key FROM quality_dispositions WHERE effect_key=?', { replacements: [effect], transaction: tx });
-    if (existing[0]) { await tx.commit(); return { ...existing[0], already_applied: true, status: 'closed' }; }
-    await req.orgDb.query('INSERT INTO quality_dispositions(id,inspection_id,disposition,quantity,warehouse_id,effect_key,created_by) VALUES(?,?,?,?,?,?,?)', { replacements: [id, body.inspection_id, body.disposition, body.quantity, body.warehouse_id || null, effect, req.user?.sub || null], transaction: tx });
-    await req.orgDb.query('UPDATE qc_inspections SET status=?,result=? WHERE id=?', { replacements: ['closed', body.disposition, body.inspection_id], transaction: tx });
-    await tx.commit(); return { id, effect_key: effect, status: 'closed' };
-  } catch (e) { await tx.rollback(); throw e; }
+    const [[inspection]]=await req.orgDb.query('SELECT id,rejected_qty,status FROM qc_inspections WHERE id=? FOR UPDATE',{replacements:[body.inspection_id],transaction:tx});
+    if(!inspection || !['processed','closed'].includes(inspection.status) || Number(inspection.rejected_qty)<=0) throw error('NCR requires a processed inspection with rejected quantity');
+    const [[existing]]=await req.orgDb.query("SELECT id,status FROM quality_ncrs WHERE inspection_id=? AND status<>'rejected' ORDER BY created_at DESC LIMIT 1 FOR UPDATE",{replacements:[body.inspection_id],transaction:tx});
+    if(existing){await tx.commit();return {...existing,already_created:true};}
+    const id = uuid();
+    await req.orgDb.query('INSERT INTO quality_ncrs(id,ncr_number,inspection_id,severity,description,status,owner_id) VALUES(?,?,?,?,?,?,?)', { replacements: [id, body.ncr_number, body.inspection_id, body.severity || 'major', body.description, 'open', req.user?.sub || null],transaction:tx });
+    await req.orgDb.query('INSERT INTO quality_ncr_events(id,ncr_id,event_type,actor_id,event_note) VALUES(?,?,?,?,?)',{replacements:[uuid(),id,'created',req.user?.sub || null,'NCR created from rejected inspection'],transaction:tx});
+    await tx.commit();return { id, status: 'open' };
+  }catch(cause){await tx.rollback();throw cause;}
 }
 async function finalizePayroll(req, runId) {
   const tx = await req.orgDb.transaction();
@@ -138,9 +133,16 @@ async function reverseJournal(req, id) {
   } catch (e) { await tx.rollback(); throw e; }
 }
 async function createFinanceDocument(req, body) {
-  if (!body.document_type || !body.document_number || !body.document_date || !Number.isFinite(Number(body.amount)) || Number(body.amount) < 0) throw error('document_type, number, date and non-negative amount are required');
+  if (!body.document_type || !body.document_number || !body.document_date || !Number.isFinite(Number(body.amount)) || Number(body.amount) <= 0) throw error('document_type, number, date and positive amount are required');
+  for(const field of ['taxable_amount','cgst','sgst','igst']) if(body[field]!==undefined && (!Number.isFinite(Number(body[field])) || Number(body[field])<0)) throw error(`Invalid ${field}`);
   const tx = await req.orgDb.transaction();
   try {
+    if(body.document_type==='payable') {
+      const [[vendor]]=await req.orgDb.query('SELECT id FROM vendors WHERE id=? AND is_active=1',{replacements:[body.party_id || null],transaction:tx});
+      if(!vendor) throw error('Choose an active vendor');
+      const taxTotal=Number(body.taxable_amount ?? body.amount)+Number(body.cgst || 0)+Number(body.sgst || 0)+Number(body.igst || 0);
+      if(Math.round(taxTotal*100)!==Math.round(Number(body.amount)*100)) throw error('Taxable amount and taxes must equal the invoice total');
+    }
     const id = uuid();
     await req.orgDb.query('INSERT INTO finance_documents(id,document_type,document_number,party_id,document_date,amount,status,due_date,taxable_amount,cgst,sgst,igst) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
       { replacements: [id, body.document_type, body.document_number, body.party_id || null, body.document_date, body.amount, 'open', body.due_date || null, body.taxable_amount ?? body.amount, body.cgst || 0, body.sgst || 0, body.igst || 0], transaction: tx });
@@ -204,6 +206,11 @@ async function transitionExpense(req, id, action) {
 async function recordVendorPayment(req, documentId, body = {}) {
   const tx = await req.orgDb.transaction();
   try {
+    const key=req.get?.('Idempotency-Key') || body.idempotency_key;
+    if(!key || String(key).length>120) throw error('A stable Idempotency-Key is required for vendor payment');
+    const operationKey=`vendor-payment:${key}`;
+    const [[existing]]=await req.orgDb.query('SELECT result_json FROM operation_keys WHERE operation_key=? FOR UPDATE',{replacements:[operationKey],transaction:tx});
+    if(existing){await tx.commit();return {...(typeof existing.result_json==='string'?JSON.parse(existing.result_json):existing.result_json),already_applied:true};}
     const [docs] = await req.orgDb.query('SELECT * FROM finance_documents WHERE id=? FOR UPDATE', { replacements: [documentId], transaction: tx });
     if (!docs[0] || docs[0].document_type !== 'payable') throw error('Payable document not found', 404);
     const amount = Number(body.amount || docs[0].amount);
@@ -214,7 +221,9 @@ async function recordVendorPayment(req, documentId, body = {}) {
     const result = await postVendorPaymentEffect(req.orgDb, paymentId, documentId, amount, body.method || 'bank', req.user?.sub, tx);
     const newPaidAmount = paidAmount + amount;
     await req.orgDb.query('UPDATE finance_documents SET paid_amount=?, status=CASE WHEN ?>=amount THEN "paid" ELSE "part_paid" END WHERE id=?', { replacements: [newPaidAmount, newPaidAmount, documentId], transaction: tx });
-    await tx.commit(); return { payment_id: paymentId, document_id: documentId, amount, journal_id: result.journal_id };
+    const response={ payment_id: paymentId, document_id: documentId, amount, journal_id: result.journal_id };
+    await req.orgDb.query('INSERT INTO operation_keys(id,operation_key,result_json) VALUES(?,?,?)',{replacements:[uuid(),operationKey,JSON.stringify(response)],transaction:tx});
+    await tx.commit(); return response;
   } catch (e) { await tx.rollback(); throw e; }
 }
 
@@ -816,7 +825,7 @@ async function transitionNcr(req, id, body = {}) {
   };
   if (!Object.prototype.hasOwnProperty.call(transitions, status) && !Object.values(transitions).flat().includes(status)) throw error('Invalid NCR status');
   const effectKey = `${id}:${status}:${body.root_cause || ''}:${body.corrective_action || ''}`;
-  return withIdempotency(req, `quality.ncr.transition.${id}`, async () => {
+  return withIdempotency(req, `quality.ncr.transition.${effectKey}`, async () => {
     const tx = await req.orgDb.transaction();
     try {
       const [rows] = await req.orgDb.query('SELECT * FROM quality_ncrs WHERE id=? FOR UPDATE', { replacements: [id], transaction: tx });
@@ -846,21 +855,29 @@ async function transitionNcr(req, id, body = {}) {
 async function applyDispositionStockEffect(req, tx, inspectionId, disposition, quantity, warehouseId, itemId = null) {
   const qty = Number(quantity || 0);
   if (!inspectionId || !disposition || qty <= 0) throw error('inspection_id, disposition and positive quantity are required');
-  const [inspectionRows] = await req.orgDb.query('SELECT id,item_id,inspected_qty,accepted_qty,rejected_qty FROM qc_inspections WHERE id=? LIMIT 1', { replacements: [inspectionId], transaction: tx });
+  const [inspectionRows] = await req.orgDb.query('SELECT * FROM qc_inspections WHERE id=? LIMIT 1', { replacements: [inspectionId], transaction: tx });
   const inspection = inspectionRows[0] || {};
   const targetItemId = itemId || inspection.item_id || null;
   if (!targetItemId) throw error('Disposition cannot be applied without an item reference');
+  if (inspection.inspection_type==='incoming') {
+    const [[legacy]]=await req.orgDb.query("SELECT COUNT(*) count FROM stock_ledger WHERE reference_type='grn' AND reference_id=? AND item_id=? AND qty_in>0",{replacements:[inspection.reference_id || inspection.source_id,targetItemId],transaction:tx});
+    // New Incoming QC credits accepted units only. Rejected units are not
+    // available inventory, so their disposition must not remove accepted stock.
+    if (!Number(legacy.count)) return {item_id:targetItemId,warehouse_id:warehouseId,movement_type:'none'};
+  }
+  if (inspection.inspection_type==='in_process') return {item_id:targetItemId,warehouse_id:warehouseId,movement_type:'none'};
   const targetWarehouseId = warehouseId || null;
-  const movement = ['quarantine', 'rework', 'scrap'].includes(disposition) ? 'out' : (disposition === 'return' ? 'in' : 'out');
-  const [summaryRows] = await req.orgDb.query('SELECT current_qty FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE', { replacements: [targetItemId, targetWarehouseId || ''], transaction: tx });
+  if(!targetWarehouseId) throw error('Warehouse is required for stocked-goods disposition');
+  const movement = 'out';
+  const [summaryRows] = await req.orgDb.query('SELECT current_qty,avg_rate FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE', { replacements: [targetItemId, targetWarehouseId], transaction: tx });
   const currentQty = Number(summaryRows[0]?.current_qty || 0);
   const nextQty = movement === 'out' ? currentQty - qty : currentQty + qty;
   if (movement === 'out' && nextQty < 0) throw Object.assign(new Error('Insufficient stock for disposition effect'), { status: 409, code: 'INSUFFICIENT_STOCK' });
   await req.orgDb.query('INSERT INTO stock_ledger(id,item_id,warehouse_id,transaction_type,reference_type,reference_id,qty_in,qty_out,balance_qty,notes,created_by,transaction_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,NOW())',
     { replacements: [require('uuid').v4(), targetItemId, targetWarehouseId, disposition, 'quality_disposition', inspectionId, movement === 'in' ? qty : 0, movement === 'out' ? qty : 0, nextQty, `Quality disposition: ${disposition}`, req.user?.sub || null], transaction: tx });
   if (summaryRows[0]) {
-    await req.orgDb.query('UPDATE stock_summary SET current_qty=?,last_updated=NOW() WHERE item_id=? AND warehouse_id=?',
-      { replacements: [nextQty, targetItemId, targetWarehouseId || ''], transaction: tx });
+    await req.orgDb.query('UPDATE stock_summary SET current_qty=?,total_value=?,last_updated=NOW() WHERE item_id=? AND warehouse_id=?',
+      { replacements: [nextQty,nextQty*Number(summaryRows[0].avg_rate || 0), targetItemId, targetWarehouseId], transaction: tx });
   } else {
     await req.orgDb.query('INSERT INTO stock_summary(item_id,warehouse_id,current_qty,avg_rate,total_value,last_updated) VALUES(?,?,?,0,0,NOW())',
       { replacements: [targetItemId, targetWarehouseId || '', nextQty], transaction: tx });
@@ -869,7 +886,7 @@ async function applyDispositionStockEffect(req, tx, inspectionId, disposition, q
 }
 
 async function disposeInspection(req, body) {
-  if (!body.inspection_id || !body.disposition || Number(body.quantity) <= 0) throw error('inspection_id, disposition and positive quantity are required');
+  if (!body.inspection_id || !['quarantine','rework','scrap','return'].includes(body.disposition) || !Number.isFinite(Number(body.quantity)) || Number(body.quantity) <= 0) throw error('inspection_id, supported disposition and positive quantity are required');
   const effectKey = `${body.inspection_id}:${body.disposition}:${body.quantity}:${body.batch_id || ''}:${body.serial_id || ''}`;
   return withIdempotency(req, `quality.disposition.${effectKey}`, async () => {
     const tx = await req.orgDb.transaction();
@@ -882,16 +899,27 @@ async function disposeInspection(req, body) {
       const [inspectionRows] = await req.orgDb.query('SELECT * FROM qc_inspections WHERE id=? FOR UPDATE', { replacements: [body.inspection_id], transaction: tx });
       const inspection = inspectionRows[0];
       if (!inspection) throw error('Inspection not found', 404);
+      if (inspection.status !== 'processed') throw error('Process inspection results before disposition',409);
+      const [[disposed]]=await req.orgDb.query('SELECT COALESCE(SUM(quantity),0) quantity FROM quality_dispositions WHERE inspection_id=? FOR UPDATE',{replacements:[body.inspection_id],transaction:tx});
+      const disposedQty=Number(disposed?.quantity || 0)+Number(body.quantity);
+      if (disposedQty > Number(inspection.rejected_qty || 0)) throw error('Disposition exceeds remaining rejected quantity');
+      const nextStatus=disposedQty===Number(inspection.rejected_qty)?'closed':'processed';
+      if (body.item_id && body.item_id !== inspection.item_id) throw error('Disposition item does not match inspection');
+      let warehouseId=body.warehouse_id || null;
+      if(!warehouseId) {
+        const [[setting]]=await req.orgDb.query("SELECT setting_value FROM company_settings WHERE setting_key='quality.default_quarantine_warehouse'",{transaction:tx});
+        warehouseId=setting?.setting_value || null;
+      }
       const id = require('uuid').v4();
-      const dispositionResult = await applyDispositionStockEffect(req, tx, body.inspection_id, body.disposition, body.quantity, body.warehouse_id || null, inspection.item_id || body.item_id || null);
+      const dispositionResult = await applyDispositionStockEffect(req, tx, body.inspection_id, body.disposition, body.quantity, warehouseId, inspection.item_id || body.item_id || null);
       await req.orgDb.query('INSERT INTO quality_dispositions(id,inspection_id,disposition,quantity,warehouse_id,batch_id,serial_id,effect_key,created_by) VALUES(?,?,?,?,?,?,?,?,?)',
-        { replacements: [id, body.inspection_id, body.disposition, body.quantity, body.warehouse_id || null, body.batch_id || null, body.serial_id || null, effectKey, req.user?.sub || null], transaction: tx });
+        { replacements: [id, body.inspection_id, body.disposition, body.quantity, warehouseId, body.batch_id || null, body.serial_id || null, effectKey, req.user?.sub || null], transaction: tx });
       await req.orgDb.query('INSERT INTO quality_disposition_effects(id,disposition_id,item_id,warehouse_id,disposition,quantity,movement_type,source_reference,created_by) VALUES(?,?,?,?,?,?,?,?,?)',
-        { replacements: [require('uuid').v4(), id, inspection.item_id || body.item_id || null, body.warehouse_id || null, body.disposition, body.quantity, dispositionResult.movement_type, body.disposition, req.user?.sub || null], transaction: tx });
-      await req.orgDb.query('UPDATE qc_inspections SET status=?,result=? WHERE id=?', { replacements: ['closed', body.disposition, body.inspection_id], transaction: tx });
+        { replacements: [require('uuid').v4(), id, inspection.item_id || body.item_id || null, warehouseId, body.disposition, body.quantity, dispositionResult.movement_type, body.disposition, req.user?.sub || null], transaction: tx });
+      await req.orgDb.query('UPDATE qc_inspections SET status=?,result=? WHERE id=?', { replacements: [nextStatus, body.disposition, body.inspection_id], transaction: tx });
       await recordAudit(req, 'quality', 'quality.disposition.create', 'quality_disposition', id, { inspection_id: body.inspection_id, disposition: body.disposition, quantity: body.quantity, stock_effect: dispositionResult });
       await tx.commit();
-      return { id, effect_key: effectKey, status: 'closed', stock_effect: dispositionResult };
+      return { id, effect_key: effectKey, status: nextStatus, stock_effect: dispositionResult };
     } catch (error) {
       await tx.rollback();
       throw error;

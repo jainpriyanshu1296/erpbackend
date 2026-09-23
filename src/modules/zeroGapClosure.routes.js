@@ -14,8 +14,6 @@ const resources = {
   'approvals': ['approval', ['entity_type','entity_id','requested_by','reason'], 'settings'],
   'rfq/suppliers': ['rfqSupplier', ['rfq_id','supplier_id','status'], 'purchase'],
   'rfq/quotation-lines': ['quotationLine', ['rfq_supplier_id','item_id','quantity','unit_price','tax_rate','delivery_days','is_selected'], 'purchase'],
-  'purchase-returns': ['purchaseReturn', ['return_number','supplier_id','purchase_invoice_id','warehouse_id','status','total_amount'], 'purchase'],
-  'purchase-returns/lines': ['purchaseReturnLine', ['return_id','item_id','quantity','unit_price','batch_id','serial_id'], 'purchase'],
   'batches': ['batch', ['item_id','batch_no','expiry_date','quantity','warehouse_id'], 'inventory'],
   'serials': ['serial', ['item_id','serial_no','status','warehouse_id'], 'inventory'],
   'physical-counts': ['count', ['count_number','warehouse_id','status'], 'inventory'],
@@ -25,7 +23,6 @@ const resources = {
   'exports': ['exportJob', ['entity_type','filter_json','status','result_json'], 'reports'],
   'sales-enquiries': ['enquiry', ['enquiry_number','customer_id','status','expected_date','notes'], 'sales'],
   'payment-allocations': ['allocation', ['payment_id','invoice_id','allocated_amount'], 'sales'],
-  'sales-returns': ['salesReturn', ['return_number','sales_order_id','customer_id','warehouse_id','status','total_amount'], 'sales'],
   'credit-notes': ['creditNote', ['note_number','sales_return_id','customer_id','invoice_id','amount','status'], 'sales'],
   'production-outputs': ['output', ['production_order_id','item_id','quantity','batch_id','warehouse_id'], 'production'],
   'production-downtime': ['downtime', ['production_order_id','minutes','reason'], 'production'],
@@ -40,18 +37,19 @@ function routeFor(path, method) { return `/closure/${path}`; }
 
 const resourceByPath = Object.fromEntries(Object.entries(resources).map(([path, [table, , module]]) => [path, { table, module }]));
 
-router.get('/closure/:resource', asyncHandler(async (req, res, next) => {
-  const definition = resourceByPath[req.params.resource];
-  if (!definition) return next();
-  await moduleGuard(definition.module)(req, res, async () => {
-    await permission(definition.module, 'can_view')(req, res, async () => {
-      const [rows] = await req.orgDb.query(`SELECT * FROM ${service.TABLES[definition.table]} ORDER BY created_at DESC LIMIT 200`);
-      return ok(res, rows);
-    });
-  });
-}));
 
 for (const [path, [table, keys, module]] of Object.entries(resources)) {
+  router.get(routeFor(path), moduleGuard(module), permission(module,'can_view'), asyncHandler(async (req,res) => {
+    const {page,limit,offset,search,sort,direction} = require('../utils/listQuery')(req.query,['id',...keys]);
+    const searchKeys = keys.filter(key => !key.endsWith('_json'));
+    const clauses = [], values = [];
+    if (search) { clauses.push(`(${searchKeys.map(key=>`CAST(${key} AS CHAR) LIKE ?`).join(' OR ')})`); values.push(...searchKeys.map(()=>`%${search}%`)); }
+    if (req.query.status && keys.includes('status')) { clauses.push('status=?'); values.push(req.query.status); }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const [[count]] = await req.orgDb.query(`SELECT COUNT(*) total FROM ${service.TABLES[table]}${where}`,{replacements:values});
+    const [rows] = await req.orgDb.query(`SELECT * FROM ${service.TABLES[table]}${where} ORDER BY ${sort} ${direction},id LIMIT ? OFFSET ?`,{replacements:[...values,limit,offset]});
+    return ok(res,rows,'Records fetched',{page,limit,total:Number(count.total)});
+  }));
   router.post(routeFor(path), moduleGuard(module), permission(module, 'can_create'), asyncHandler(async (req, res) => {
     const data = bodyFor(keys, req.body);
     const required = table === 'approval' ? ['entity_type','entity_id'] : [];
@@ -81,12 +79,6 @@ router.post('/closure/approvals/:id/decision', moduleGuard('settings'), permissi
   const action = req.body.action === 'approve' ? 'approved' : 'rejected';
   return ok(res, await service.actOnApproval(req.orgDb, req.params.id, action, req.user?.sub, req.user?.role, req.body.notes), 'Approval decision recorded');
 }));
-router.post('/closure/purchase-returns/:id/post', moduleGuard('purchase'), permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
-  return ok(res, await service.postReturn(req.orgDb, 'purchase', req.params.id, req.user?.sub, req.body.warehouse_id), 'Purchase return posted');
-}));
-router.post('/closure/sales-returns/:id/post', moduleGuard('sales'), permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
-  return ok(res, await service.postReturn(req.orgDb, 'sales', req.params.id, req.user?.sub, req.body.warehouse_id), 'Sales return posted');
-}));
 router.post('/closure/credit-notes/:id/issue', moduleGuard('sales'), permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
   return ok(res, await service.issueCreditNote(req.orgDb, req.params.id, req.user?.sub), 'Credit note issued');
 }));
@@ -114,15 +106,6 @@ router.patch('/closure/approvals/:id', moduleGuard('settings'), permission('sett
 }));
 router.patch('/closure/physical-counts/:id', moduleGuard('inventory'), permission('inventory', 'can_edit'), asyncHandler(async (req, res) => {
   return ok(res, await service.transition(req.orgDb, 'count', req.params.id, req.body.status, req.user?.sub), 'Physical count updated');
-}));
-router.patch('/closure/purchase-returns/:id', moduleGuard('purchase'), permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
-  return ok(res, await service.transition(req.orgDb, 'purchaseReturn', req.params.id, req.body.status, req.user?.sub), 'Purchase return updated');
-}));
-router.post('/closure/purchase-returns/:id/match', moduleGuard('purchase'), permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
-  return ok(res, await service.matchPurchaseReturn(req.orgDb, req.params.id, req.body.purchase_invoice_id, req.user?.sub), 'Purchase return matched');
-}));
-router.patch('/closure/sales-returns/:id', moduleGuard('sales'), permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
-  return ok(res, await service.transition(req.orgDb, 'salesReturn', req.params.id, req.body.status, req.user?.sub), 'Sales return updated');
 }));
 router.patch('/closure/credit-notes/:id', moduleGuard('sales'), permission('sales', 'can_edit'), asyncHandler(async (req, res) => {
   return ok(res, await service.transition(req.orgDb, 'creditNote', req.params.id, req.body.status, req.user?.sub), 'Credit note updated');

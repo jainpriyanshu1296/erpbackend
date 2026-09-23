@@ -4,11 +4,13 @@ const orgContext = require('../middleware/orgContext');
 const entitlement = require('../middleware/entitlement');
 const moduleGuard = require('../middleware/moduleGuard');
 const permission = require('../middleware/permission');
-const { ok, fail, asyncHandler } = require('../utils/response');
+const { ok, fail, created, asyncHandler } = require('../utils/response');
 const service = require('./inventoryPurchase.service');
 
 const router = express.Router();
 router.use(auth, orgContext, entitlement);
+router.post('/purchase/requisitions/:id/rfq',moduleGuard('purchase'),permission('purchase','can_create'),asyncHandler(async(req,res)=>created(res,await service.rfqFromRequisition(req.orgDb,req.params.id,req.user.sub))));
+router.post('/purchase/rfqs/:id/order',moduleGuard('purchase'),permission('purchase','can_create'),asyncHandler(async(req,res)=>created(res,await service.orderFromRfq(req.orgDb,req.params.id,req.body.vendor_id,req.body.warehouse_id,req.user.sub))));
 const listRoute = (path, table, module) => {
   router.get(path, moduleGuard(module), permission(module, 'can_view'), asyncHandler(async (req, res) => {
     const result = await service.list(req.orgDb, table, req.query);
@@ -19,12 +21,13 @@ const listRoute = (path, table, module) => {
     return rows[0] ? ok(res, rows[0]) : fail(res, 404, 'NOT_FOUND', 'Record not found');
   }));
 };
-listRoute('/inventory/items', 'item_master', 'inventory');
-listRoute('/vendors', 'vendors', 'purchase');
+// Item Master is deliberately served by the validated implementation in app.js.
+// Do not add a generic list route here: this router is mounted after the
+// protected router and would otherwise leave two competing definitions.
 ['purchase_requisitions', 'purchase_orders', 'grn'].forEach((table) => {
   const path = table === 'purchase_requisitions' ? '/purchase/requisitions' : table === 'purchase_orders' ? '/purchase/orders' : '/purchase/grn';
-  listRoute(path, table, 'purchase');
-  router.put(`${path}/:id/status`, moduleGuard('purchase'), permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
+  if (table === 'grn') listRoute(path, table, 'purchase');
+  router.put(`${path}/:id/status`, moduleGuard('purchase'), (req,res,next) => permission('purchase', ['approved','rejected'].includes(req.body?.status) ? 'can_approve' : 'can_edit')(req,res,next), asyncHandler(async (req, res) => {
     const result = await service.transition(req.orgDb, table, req.params.id, req.body?.status, req.user?.sub);
     if (result.error === 'NOT_FOUND') return fail(res, 404, 'NOT_FOUND', 'Record not found');
     if (result.error) return fail(res, 409, result.error, `Invalid status transition from ${result.current}`);
@@ -47,17 +50,7 @@ router.post('/vendors/:vendorId/items', moduleGuard('purchase'), permission('pur
   );
   return ok(res, { vendor_id: req.params.vendorId, item_id: req.body.item_id }, 'Vendor item saved');
 }));
-router.post('/purchase/grn/:id/post', moduleGuard('purchase'), permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
-  const result = await service.postGrn(req.orgDb, req.params.id, req.user?.sub);
-  if (result.error === 'NOT_FOUND') return fail(res, 404, 'NOT_FOUND', 'GRN not found');
-  if (result.error === 'ALREADY_POSTED') return fail(res, 409, result.error, 'GRN has already been posted');
-  if (result.error) return fail(res, 409, result.error, result.current ? `Invalid status transition from ${result.current}` : 'Unable to post GRN');
-  return ok(res, result, 'GRN posted');
-}));
-
 const operationalResources = [
-  ['/inventory/transfers', 'warehouse_transfers', 'inventory'],
-  ['/inventory/counts', 'stock_counts', 'inventory'],
   ['/inventory/reservations', 'stock_reservations', 'inventory'],
   ['/purchase/rfqs', 'rfqs', 'purchase'],
   ['/purchase/supplier-quotations', 'supplier_quotations', 'purchase']
@@ -95,13 +88,6 @@ router.post('/purchase/supplier-quotations', moduleGuard('purchase'), permission
   return created(res, { id, quotation_number: quotationNumber, rfq_id: rfqId, vendor_id: vendorId, status: 'draft' });
 }));
 
-// Inventory controls and purchasing foundation. All writes are transactional in the service layer.
-listRoute('/inventory/transfers', 'warehouse_transfers', 'inventory');
-listRoute('/inventory/reservations', 'stock_reservations', 'inventory');
-listRoute('/inventory/counts', 'stock_counts', 'inventory');
-listRoute('/purchase/rfqs', 'rfqs', 'purchase');
-listRoute('/purchase/supplier-quotations', 'supplier_quotations', 'purchase');
-
 router.put('/inventory/transfers/:id/status', moduleGuard('inventory'), permission('inventory', 'can_edit'), asyncHandler(async (req, res) => {
   const result = await service.transitionTransfer(req.orgDb, req.params.id, req.body?.status, req.user?.sub);
   if (result.error === 'NOT_FOUND') return fail(res, 404, 'NOT_FOUND', 'Transfer not found');
@@ -125,12 +111,6 @@ router.put('/inventory/reservations/:id/:action', moduleGuard('inventory'), perm
   if (result.error) return fail(res, 409, result.error, 'Unable to change reservation');
   return ok(res, result, 'Reservation updated');
 }));
-router.post('/inventory/counts/:id/post', moduleGuard('inventory'), permission('inventory', 'can_edit'), asyncHandler(async (req, res) => {
-  const result = await service.postStockCount(req.orgDb, req.params.id, req.user?.sub);
-  if (result.error === 'NOT_FOUND') return fail(res, 404, 'NOT_FOUND', 'Stock count not found');
-  if (result.error) return fail(res, 409, result.error, result.current ? `Invalid status transition from ${result.current}` : 'Unable to post stock count');
-  return ok(res, result, result.alreadyPosted ? 'Stock count was already posted' : 'Stock count posted');
-}));
 router.put('/purchase/rfqs/:id/status', moduleGuard('purchase'), permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
   const result = await service.transitionRfq(req.orgDb, req.params.id, req.body?.status, req.user?.sub);
   if (result.error === 'NOT_FOUND') return fail(res, 404, 'NOT_FOUND', 'RFQ not found');
@@ -143,7 +123,7 @@ router.get('/inventory/dashboard', moduleGuard('inventory'), permission('invento
     req.orgDb.query('SELECT COUNT(*) AS item_locations, COALESCE(SUM(current_qty),0) AS on_hand FROM stock_summary'),
     req.orgDb.query("SELECT COUNT(*) AS pending FROM warehouse_transfers WHERE status IN ('requested','approved','in_transit')"),
     req.orgDb.query("SELECT COUNT(*) AS active FROM stock_reservations WHERE status='reserved'"),
-    req.orgDb.query("SELECT COUNT(*) AS open_counts FROM stock_counts WHERE status='draft'")
+    req.orgDb.query("SELECT COUNT(*) AS open_counts FROM physical_counts WHERE status IN ('draft','open','submitted','approved')")
   ]);
   return ok(res, { stock: stock[0], transfers: transfers[0], reservations: reservations[0], counts: counts[0] });
 }));

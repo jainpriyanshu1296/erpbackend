@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transition, dispatch, transitionJobCard, calculateMRP } = require('../src/services/salesProduction.service');
+const { transition, dispatch, transitionJobCard, calculateMRP, resolveOutputQuantity } = require('../src/services/salesProduction.service');
 
 function fakeDb(mode = 'sales') {
   const state = { status: 'draft', effect: false, qty: 10, ledger: 0 };
@@ -14,9 +14,9 @@ function fakeDb(mode = 'sales') {
       if (sql.startsWith('SELECT id,status FROM work_orders')) return [[{ id: 'w1', status: state.status }]];
       if (sql.startsWith('UPDATE work_orders')) { state.status = 'released'; return [[]]; }
       if (sql.startsWith('INSERT INTO activity_log')) return [[]];
-      if (sql.startsWith('SELECT id,status,warehouse_id FROM delivery_challans')) return [[{ id: 'd1', status: 'draft', warehouse_id: 'w1' }]];
+      if (sql.startsWith('SELECT id,status,warehouse_id,so_id,customer_id FROM delivery_challans')) return [[{ id: 'd1', status: 'draft', warehouse_id: 'w1' }]];
       if (sql.startsWith('SELECT id FROM dispatch_effects')) return [state.effect ? [{ id: 'effect' }] : []];
-      if (sql.startsWith('SELECT item_id,quantity FROM delivery_challan_items')) return [[{ item_id: 'i1', quantity: 2 }]];
+      if (sql.startsWith('SELECT id,item_id,quantity,order_item_id FROM delivery_challan_items')) return [[{ id: 'di1', item_id: 'i1', quantity: 2 }]];
       if (sql.startsWith('SELECT current_qty,avg_rate')) return [[{ current_qty: state.qty, avg_rate: 5 }]];
       if (sql.startsWith('UPDATE stock_summary')) { state.qty -= 2; return [[]]; }
       if (sql.startsWith('INSERT INTO stock_ledger')) { state.ledger += 1; return [[]]; }
@@ -72,4 +72,12 @@ test('material requirements calculation is deterministic and never negative', ()
   assert.equal(calculateMRP(100, 20, 30, 5), 55);
   assert.equal(calculateMRP(10, 20, 0, 0), 0);
   assert.throws(() => calculateMRP(-1, 0), /non-negative/);
+});
+
+test('production output normalizes decimal strings and rejects invalid or excessive quantities', () => {
+  assert.equal(resolveOutputQuantity('0.000', '10.000', '4.500'), 4.5);
+  assert.equal(resolveOutputQuantity('3.000', '10.000', '4.500'), 3);
+  assert.throws(() => resolveOutputQuantity('0.000', '10.000', '0.000'), /positive/);
+  assert.throws(() => resolveOutputQuantity('0.000', '10.000', '11.000'), /cannot exceed/);
+  assert.throws(() => resolveOutputQuantity('not-a-number', '10.000', 'not-a-number'), /positive/);
 });

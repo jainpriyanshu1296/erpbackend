@@ -13,8 +13,50 @@ function splitStatements(sql) {
     .filter(Boolean);
 }
 
+function splitConditionalStatements(sql) {
+  const directives = [];
+  let condition = null;
+  let buffer = '';
+  for (const line of sql.split(/\r?\n/)) {
+    const directive = line.match(/^\s*--\s*@if-(column|columns|table)\s+(.+?)\s*$/i);
+    if (directive) {
+      if (buffer.trim()) throw new Error('Migration condition must appear immediately before a statement');
+      condition = { kind: directive[1].toLowerCase(), args: directive[2].trim().split(/\s+/).map(value => value.replace(/`/g, '')) };
+      continue;
+    }
+    if (/^\s*--/.test(line) || /^\s*$/.test(line)) continue;
+    buffer += `${line}\n`;
+    let offset;
+    while ((offset = buffer.indexOf(';')) !== -1) {
+      const statement = buffer.slice(0, offset).trim();
+      buffer = buffer.slice(offset + 1);
+      if (statement) directives.push({ statement, condition });
+      condition = null;
+    }
+  }
+  if (buffer.trim()) directives.push({ statement: buffer.trim(), condition });
+  return directives;
+}
+
+async function conditionMatches(conn, dbName, condition) {
+  if (!condition) return true;
+  if (condition.kind === 'table') {
+    const [rows] = await conn.query('SELECT 1 FROM information_schema.tables WHERE table_schema=? AND table_name=? LIMIT 1', [dbName, condition.args[0]]);
+    return rows.length > 0;
+  }
+  const [table, ...columns] = condition.args;
+  if (!table || !columns.length) throw new Error(`Invalid migration condition: ${condition.kind} ${condition.args.join(' ')}`);
+  const [rows] = await conn.query(
+    'SELECT column_name FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_name IN (?)',
+    [dbName, table, columns]
+  );
+  return (condition.kind === 'column' ? rows.length > 0 : rows.length === columns.length);
+}
+
 async function executeMigrationSql(conn, dbName, sql) {
-  for (const statement of splitStatements(sql)) {
+  for (const entry of splitConditionalStatements(sql)) {
+    const { statement, condition } = entry;
+    if (!(await conditionMatches(conn, dbName, condition))) continue;
     const indexMatch = statement.match(/^CREATE\s+(UNIQUE\s+)?INDEX\s+([`A-Za-z0-9_]+)\s+ON\s+([`A-Za-z0-9_.]+)\s*\(([^)]+)\)$/i);
     if (indexMatch) {
       const [, unique, rawIndex, rawTable, columns] = indexMatch;

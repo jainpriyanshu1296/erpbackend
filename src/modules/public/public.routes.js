@@ -3,6 +3,11 @@ const { asyncHandler, ok } = require('../../utils/response');
 const masterDb = require('../../config/db');
 const { tenantSubdomain } = require('../../config/domain');
 
+router.get('/content/landing', asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return ok(res, await require('../../services/cms.service').read(true));
+}));
+
 router.get('/modules', asyncHandler(async (req, res) => {
   const [rows] = await masterDb.query(`
     SELECT m.module_key AS \`key\`, m.module_name AS name, m.min_plan,

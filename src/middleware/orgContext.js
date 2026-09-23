@@ -3,7 +3,7 @@ const { getOrgDb } = require('../config/orgDb');
 const { fail, asyncHandler } = require('../utils/response');
 const { tenantSubdomain, requestHost } = require('../config/domain');
 module.exports = asyncHandler(async (req, res, next) => {
-  if (['superadmin', 'support'].includes(req.user?.role) && req.path.startsWith('/admin')) return next();
+  if (['superadmin', 'support'].includes(req.user?.role) && String(req.originalUrl || '').startsWith('/api/v1/admin/')) return next();
   const subdomain = tenantSubdomain(req);
   if (!subdomain) return fail(res, 400, 'TENANT_DOMAIN_REQUIRED', 'A tenant subdomain is required');
   const query = `SELECT o.*, d.hostname FROM organizations o

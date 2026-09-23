@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS public_pages (
+  page_key VARCHAR(50) PRIMARY KEY,
+  draft_content JSON NOT NULL,
+  published_content JSON NULL,
+  revision INT NOT NULL DEFAULT 1,
+  published_at DATETIME NULL,
+  updated_by VARCHAR(36) NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);

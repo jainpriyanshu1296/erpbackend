@@ -115,103 +115,22 @@ workflow.post('/purchase/grn/from-order', permission('purchase', 'can_create'), 
   } catch (error) { await tx.rollback(); throw error; }
 }));
 
-workflow.post('/purchase/grn/:id/post', permission('purchase', 'can_approve'), asyncHandler(async (req, res) => {
-  const { warehouse_id: warehouseId, items } = req.body;
-  const tx = await req.orgDb.transaction();
-  try {
-    const [grns] = await req.orgDb.query('SELECT g.*,p.status po_status,p.warehouse_id FROM grn g JOIN purchase_orders p ON p.id=g.po_id WHERE g.id=? FOR UPDATE', { replacements: [req.params.id], transaction: tx });
-    if (!grns.length || !['approved', 'part_received'].includes(grns[0].po_status)) throw invalid('GRN must reference an approved purchase order');
-    if (grns[0].status === 'posted') throw Object.assign(new Error('GRN has already been posted'), { status: 409, code: 'ALREADY_POSTED' });
-    const received = items?.length ? items : await lines(req.orgDb, 'grn_items', 'grn_id', req.params.id, tx);
-    if (!received.length) throw invalid('GRN items are required');
-    const warehouse = warehouseId || grns[0].warehouse_id;
-    if (!warehouse) throw invalid('A warehouse is required before posting the GRN');
-    if (items?.length) {
-      await req.orgDb.query('DELETE FROM grn_items WHERE grn_id=?', { replacements: [req.params.id], transaction: tx });
-      for (const item of received) {
-        await req.orgDb.query('INSERT INTO grn_items(id,grn_id,po_item_id,item_id,quantity,rate) VALUES(?,?,?,?,?,?)', {
-          replacements: [uuid(), req.params.id, item.po_item_id || null, item.item_id, item.quantity, Number(item.rate || 0)], transaction: tx
-        });
-      }
-    }
-    for (const item of received) {
-      const quantity = Number(item.quantity), rate = Number(item.rate || 0);
-      if (!item.item_id || !Number.isFinite(quantity) || quantity <= 0) throw invalid('Each GRN item needs a positive quantity');
-      const [ordered] = await req.orgDb.query('SELECT quantity FROM purchase_order_items WHERE id=? AND order_id=? FOR UPDATE', { replacements: [item.po_item_id, grns[0].po_id], transaction: tx });
-      if (!ordered.length) throw invalid(`GRN item ${item.item_id} is not part of the purchase order`);
-      const [[receivedBefore]] = await req.orgDb.query(
-        "SELECT COALESCE(SUM(gi.quantity),0) AS quantity FROM grn_items gi JOIN grn g ON g.id=gi.grn_id WHERE gi.po_item_id=? AND g.status='posted' AND g.id<>?",
-        { replacements: [item.po_item_id, req.params.id], transaction: tx }
-      );
-      if (Number(receivedBefore.quantity) + quantity > Number(ordered[0].quantity)) {
-        throw Object.assign(new Error(`Received quantity exceeds ordered quantity for item ${item.item_id}`), { status: 409, code: 'OVER_RECEIPT' });
-      }
-      const [summary] = await req.orgDb.query('SELECT current_qty,avg_rate FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE', { replacements: [item.item_id, warehouse], transaction: tx });
-      const current = Number(summary[0]?.current_qty || 0), oldRate = Number(summary[0]?.avg_rate || 0);
-      const next = current + quantity, avg = next ? ((current * oldRate) + (quantity * rate)) / next : rate;
-      await req.orgDb.query('INSERT INTO stock_summary(item_id,warehouse_id,current_qty,avg_rate,total_value) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE current_qty=?,avg_rate=?,total_value=?',
-        { replacements: [item.item_id, warehouse, next, avg, next * avg, next, avg, next * avg], transaction: tx });
-      await req.orgDb.query('INSERT INTO stock_ledger(id,item_id,warehouse_id,transaction_type,reference_type,reference_id,qty_in,balance_qty,rate,amount,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-        { replacements: [uuid(), item.item_id, warehouse, 'purchase_receipt', 'grn', req.params.id, quantity, next, rate, quantity * rate, req.user.sub], transaction: tx });
-    }
-    await req.orgDb.query("UPDATE grn SET status='posted',received_date=COALESCE(received_date,CURDATE()) WHERE id=?", { replacements: [req.params.id], transaction: tx });
-    const [[remaining]] = await req.orgDb.query(
-      "SELECT COUNT(*) AS count FROM purchase_order_items poi LEFT JOIN (SELECT po_item_id,SUM(quantity) quantity FROM grn_items gi JOIN grn g ON g.id=gi.grn_id WHERE g.status='posted' GROUP BY po_item_id) received ON received.po_item_id=poi.id WHERE poi.order_id=? AND COALESCE(received.quantity,0)<poi.quantity",
-      { replacements: [grns[0].po_id], transaction: tx }
-    );
-    await req.orgDb.query("UPDATE purchase_orders SET status=? WHERE id=?", { replacements: [Number(remaining.count) === 0 ? 'received' : 'part_received', grns[0].po_id], transaction: tx });
-    await tx.commit();
-    return ok(res, { id: req.params.id, status: 'posted' }, 'GRN posted and stock updated');
-  } catch (error) { await tx.rollback(); throw error; }
+workflow.post('/purchase/grn/:id/post',permission('purchase','can_approve'),asyncHandler(async(req,res)=>{
+  const result=await require('./inventoryPurchase.service').postGrn(req.orgDb,req.params.id,req.user.sub,req.body);
+  if(result.error) return fail(res,result.error==='NOT_FOUND'?404:409,result.error,'Receipt cannot be posted');
+  return ok(res,result,'Receipt posted; Incoming QC releases accepted stock');
 }));
 
 workflow.post('/sales/orders/from-quotation', permission('sales', 'can_create'), asyncHandler(async (req, res) => {
-  const { quotation_id: quotationId } = req.body;
-  const tx = await req.orgDb.transaction();
-  try {
-    const [quote] = await req.orgDb.query("SELECT * FROM quotations WHERE id=? FOR UPDATE", { replacements: [quotationId], transaction: tx });
-    if (!quote.length) throw invalid('Only an accepted quotation can create an order');
-    const [existing] = await req.orgDb.query('SELECT id,so_number,status FROM sales_orders WHERE quotation_id=? LIMIT 1 FOR UPDATE', { replacements: [quotationId], transaction: tx });
-    if (existing.length) { await tx.commit(); return ok(res, { id: existing[0].id, so_number: existing[0].so_number, quotation_id: quotationId, status: existing[0].status, already_converted: true }, 'Sales order already exists'); }
-    if (!['accepted', 'approved'].includes(quote[0].status)) throw invalid('Only an accepted quotation can create an order');
-    const source = await lines(req.orgDb, 'quotation_items', 'quotation_id', quotationId, tx);
-    if (!source.length) throw invalid('Quotation has no items');
-    const id = uuid(), number = await nextNumber(req.orgDb, 'sales_order', 'SO-', 5, tx);
-    await req.orgDb.query("INSERT INTO sales_orders(id,so_number,quotation_id,customer_id,status,total_amount) VALUES(?,?,?,?,'confirmed',?)",
-      { replacements: [id, number, quotationId, quote[0].customer_id, quote[0].total_amount || 0], transaction: tx });
-    for (const item of source) await req.orgDb.query('INSERT INTO sales_order_items(id,order_id,item_id,quantity,rate,quotation_item_id) VALUES(?,?,?,?,?,?)',
-      { replacements: [uuid(), id, item.item_id, item.quantity, item.rate, item.id], transaction: tx });
-    await req.orgDb.query("UPDATE quotations SET status='converted' WHERE id=?", { replacements: [quotationId], transaction: tx });
-    await tx.commit();
-    handleSalesOrderConfirmed(req.orgDb, id, req.user.sub).catch(err => console.error('[AUTOMATION ERROR]:', err.message));
-    return ok(res, { id, so_number: number, quotation_id: quotationId, status: 'confirmed' }, 'Sales order created');
-  } catch (error) { await tx.rollback(); throw error; }
+  const result = await require('../services/salesProduction.service').createSalesOrderFromQuotation(req.orgDb, req.body.quotation_id);
+  if (!result.already_converted) handleSalesOrderConfirmed(req.orgDb, result.id, req.user.sub).catch(err => console.error('[AUTOMATION ERROR]:', err.message));
+  return ok(res, result, result.already_converted ? 'Sales order already exists' : 'Sales order created');
 }));
 
 workflow.post('/sales/invoices/from-order', permission('sales', 'can_create'), asyncHandler(async (req, res) => {
-  const { order_id: orderId } = req.body;
-  const tx = await req.orgDb.transaction();
-  try {
-    const [order] = await req.orgDb.query("SELECT * FROM sales_orders WHERE id=? AND status IN ('confirmed','approved') FOR UPDATE", { replacements: [orderId], transaction: tx });
-    if (!order.length) throw invalid('Only a confirmed sales order can be invoiced');
-    const id = uuid(), number = await nextNumber(req.orgDb, 'invoice', 'INV-', 5, tx);
-    await req.orgDb.query("INSERT INTO invoices(id,invoice_number,order_id,customer_id,invoice_date,status,total_amount,balance_amount) VALUES(?,?,?, ?,CURDATE(),'draft',?,?)",
-      { replacements: [id, number, orderId, order[0].customer_id, order[0].total_amount || 0, order[0].total_amount || 0], transaction: tx });
-    const [orderItems] = await req.orgDb.query(
-      'SELECT item_id,quantity,rate FROM sales_order_items WHERE order_id=?',
-      { replacements: [orderId], transaction: tx }
-    );
-    for (const item of orderItems) {
-      const taxable = Number(item.quantity || 0) * Number(item.rate || 0);
-      await req.orgDb.query(
-        'INSERT INTO invoice_items(id,invoice_id,item_id,quantity,rate,taxable,total) VALUES(?,?,?,?,?,?,?)',
-        { replacements: [uuid(), id, item.item_id, item.quantity, item.rate, taxable, taxable], transaction: tx }
-      );
-    }
-    await req.orgDb.query("UPDATE sales_orders SET status='invoiced' WHERE id=?", { replacements: [orderId], transaction: tx });
-    await postInvoiceEffect(req.orgDb, id, req.user.sub, tx);
-    await tx.commit(); return ok(res, { id, invoice_number: number, order_id: orderId, status: 'draft' }, 'Invoice created');
-  } catch (error) { await tx.rollback(); throw error; }
+  const service = require('../services/invoice.service');
+  if (!service.salesOrderId(req.body)) throw invalid('so_id is required');
+  return ok(res, await service.createInvoice(req.orgDb, req.body, req.user.sub), 'Invoice created');
 }));
 
 // ─────────────────────────────────────────────────────────────
@@ -374,14 +293,8 @@ workflow.post('/sales/orders/:id/confirm', permission('sales', 'can_edit'), asyn
 }));
 
 // Explicit Work Order completion (triggers auto-backflushing of raw materials)
-workflow.post('/production/work-orders/:id/complete', permission('production', 'can_edit'), asyncHandler(async (req, res) => {
-  const producedQty = Number(req.body.produced_qty || 0);
-  await req.orgDb.query(
-    "UPDATE work_orders SET status = 'completed', produced_qty = GREATEST(produced_qty, ?), actual_end = NOW() WHERE id = ?",
-    { replacements: [producedQty, req.params.id] }
-  );
-  const autoResult = await handleWorkOrderCompleted(req.orgDb, req.params.id, producedQty, req.user.sub);
-  return ok(res, { id: req.params.id, status: 'completed', automation: autoResult }, 'Work order completed and inventory backflushed');
+workflow.post('/production/work-orders/:id/complete', permission('production','can_edit'), asyncHandler(async (req,res) => {
+  return ok(res,await require('../services/salesProduction.service').completeWorkOrder(req.orgDb,req.params.id,req.body.warehouse_id,req.user.sub),'Work order completed');
 }));
 
 // Organization Automation Rules
@@ -396,30 +309,22 @@ workflow.put('/settings/automations', permission('settings', 'can_edit'), asyncH
 }));
 
 // QC Inspection Result Process (triggers auto-split and debit note)
-workflow.post('/quality/inspections/:id/process-result', permission('quality', 'can_edit'), asyncHandler(async (req, res) => {
-  const { accepted_qty, rejected_qty } = req.body;
-  if (accepted_qty !== undefined || rejected_qty !== undefined) {
-    await req.orgDb.query(
-      'UPDATE qc_inspections SET accepted_qty = ?, rejected_qty = ? WHERE id = ?',
-      { replacements: [Number(accepted_qty || 0), Number(rejected_qty || 0), req.params.id] }
-    );
-  }
-  const autoResult = await handleQcInspectionResult(req.orgDb, req.params.id, req.user.sub);
-  return ok(res, autoResult, 'QC result processed and stock updated');
+workflow.post('/quality/inspections/:id/process-result', permission('quality','can_edit'), asyncHandler(async (req,res) => {
+  return ok(res,await require('../services/qualityInspection.service').processResult(req.orgDb,req.params.id,req.body,req.user.sub),'QC result processed');
 }));
 
 // Delivery Challan Save (triggers auto-invoice drafting)
 workflow.post('/sales/challans/create-and-invoice', permission('sales', 'can_create'), asyncHandler(async (req, res) => {
-  const { customer_id, sales_order_id, vehicle_number, items } = req.body;
+  const { customer_id, so_id, vehicle_number, items } = req.body;
   const challanId = uuid();
   const challanNumber = await nextNumber(req.orgDb, 'delivery_challan', 'DC-', 5);
 
   const tx = await req.orgDb.transaction();
   try {
     await req.orgDb.query(`
-      INSERT INTO delivery_challans (id, challan_number, customer_id, sales_order_id, challan_date, vehicle_number)
+      INSERT INTO delivery_challans (id, challan_number, customer_id, so_id, challan_date, vehicle_number)
       VALUES (?, ?, ?, ?, CURDATE(), ?)
-    `, { replacements: [challanId, challanNumber, customer_id, sales_order_id || null, vehicle_number || null], transaction: tx });
+    `, { replacements: [challanId, challanNumber, customer_id, so_id || null, vehicle_number || null], transaction: tx });
 
     for (const item of (items || [])) {
       await req.orgDb.query(`
@@ -572,13 +477,13 @@ workflow.get('/production/work-orders/:id/qr', permission('production', 'can_vie
 }));
 
 workflow.post('/sales/challans/verify-scan', permission('sales', 'can_view'), asyncHandler(async (req, res) => {
-  const { sales_order_id, scanned_code } = req.body;
+  const { so_id, scanned_code } = req.body;
   const [items] = await req.orgDb.query(`
     SELECT soi.item_id, soi.quantity, im.item_name, im.item_code
     FROM sales_order_items soi
     JOIN item_master im ON im.id = soi.item_id
-    WHERE soi.order_id = ?
-  `, { replacements: [sales_order_id] });
+    WHERE soi.so_id = ?
+  `, { replacements: [so_id] });
 
   const result = verifyDispatchScan({ expectedItems: items, scannedCode: scanned_code });
   return ok(res, result);

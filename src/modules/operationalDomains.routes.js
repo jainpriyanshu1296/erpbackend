@@ -12,10 +12,14 @@ const secure = (mod, action) => [auth, orgContext, entitlement, moduleGuard(mod)
 const page = query => ({ page: Math.max(1, Number(query.page || 1)), limit: Math.min(100, Math.max(1, Number(query.limit || 20))) });
 const moduleSettings = module => ({ prefix: `${module}.%`, module });
 const allowedSettings = {
+  inventory: ['default_warehouse','stock_count_frequency_days','batch_tracking_enabled','serial_tracking_enabled'],
+  production: ['default_warehouse','require_material_issue','scrap_tolerance_percent'],
   purchase: ['approval_required','over_receipt_tolerance','invoice_match_tolerance','default_payment_terms'],
   sales: ['credit_limit_enforced','negative_stock_allowed','dispatch_requires_confirmation','default_payment_terms'],
   quality: ['incoming_qc_required','in_process_qc_required','final_qc_required','auto_ncr_on_failure','default_quarantine_warehouse']
 };
+
+const { requireInspectionSource } = require('../services/qualityInspection.service');
 
 router.get('/purchase/vendor-invoices', ...secure('purchase', 'can_view'), asyncHandler(async (req, res) => {
   const { page: current, limit } = page(req.query); const search = String(req.query.search || '').trim();
@@ -39,8 +43,11 @@ router.post('/purchase/vendor-invoices/:id/match', ...secure('purchase', 'can_ed
     const [[grn]] = await req.orgDb.query('SELECT * FROM grn WHERE id=? AND po_id=? FOR UPDATE', { replacements:[req.body.grn_id,req.body.purchase_order_id],transaction:tx });
     const [[po]] = await req.orgDb.query('SELECT * FROM purchase_orders WHERE id=? FOR UPDATE', { replacements:[req.body.purchase_order_id],transaction:tx });
     if (!invoice || !po || !grn) throw Object.assign(new Error('Invoice, purchase order, or matching GRN was not found'), { status:404,code:'NOT_FOUND' });
+    if (!['open','matched'].includes(invoice.status)) throw Object.assign(new Error('Only an open invoice can be matched'),{status:409,code:'MATCH_FAILED'});
     if (invoice.party_id !== po.vendor_id || po.vendor_id !== grn.vendor_id) throw Object.assign(new Error('Vendor differs between invoice, PO and GRN'), { status:409,code:'MATCH_FAILED' });
     if (grn.status !== 'posted') throw Object.assign(new Error('GRN must be posted before invoice matching'), { status:409,code:'MATCH_FAILED' });
+    const [[prior]]=await req.orgDb.query("SELECT target_id FROM related_documents WHERE source_type='purchase_invoice' AND source_id=? AND relation='matched_order' FOR UPDATE",{replacements:[req.params.id],transaction:tx});
+    if(prior && prior.target_id!==po.id) throw Object.assign(new Error('Invoice is already matched to another purchase order'),{status:409,code:'MATCH_FAILED'});
     const tolerance = Number(req.body.tolerance || 0), variance = Math.abs(Number(invoice.amount)-Number(po.total_amount));
     if (variance > tolerance) throw Object.assign(new Error(`Invoice variance ${variance.toFixed(2)} exceeds tolerance`), { status:409,code:'MATCH_FAILED' });
     for (const [type,id,relation] of [['purchase_order',po.id,'matched_order'],['grn',grn.id,'matched_receipt']]) await req.orgDb.query('INSERT INTO related_documents(id,source_type,source_id,target_type,target_id,relation,created_by) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE target_id=VALUES(target_id)', { replacements:[require('uuid').v4(),'purchase_invoice',req.params.id,type,id,relation,req.user?.sub||null],transaction:tx });
@@ -50,9 +57,12 @@ router.post('/purchase/vendor-invoices/:id/match', ...secure('purchase', 'can_ed
 }));
 router.post('/purchase/vendor-invoices/:id/pay', ...secure('purchase', 'can_edit'), asyncHandler(async (req, res) => ok(res, await service.recordVendorPayment(req, req.params.id, req.body))));
 router.get('/quality/ncrs', ...secure('quality', 'can_view'), asyncHandler(async (req, res) => {
-  const [rows] = await req.orgDb.query('SELECT * FROM quality_ncrs ORDER BY ncr_number DESC LIMIT 500'); return ok(res, rows);
+  const {page,limit,offset,search,sort,direction}=require('../utils/listQuery')(req.query,['ncr_number','severity','status','created_at']);
+  const where=search?' WHERE ncr_number LIKE ? OR description LIKE ? OR status LIKE ?':'',values=search?[`%${search}%`,`%${search}%`,`%${search}%`]:[];
+  const [[count]]=await req.orgDb.query(`SELECT COUNT(*) total FROM quality_ncrs${where}`,{replacements:values});
+  const [rows] = await req.orgDb.query(`SELECT * FROM quality_ncrs${where} ORDER BY ${sort} ${direction},id LIMIT ? OFFSET ?`,{replacements:[...values,limit,offset]}); return ok(res, rows,'NCRs fetched',{page,limit,total:Number(count.total)});
 }));
-router.get('/quality/specifications', ...secure('quality', 'can_view'), asyncHandler(async (req, res) => { const [rows] = await req.orgDb.query('SELECT * FROM quality_specifications ORDER BY code LIMIT 500'); return ok(res, rows); }));
+router.get('/quality/specifications', ...secure('quality', 'can_view'), asyncHandler(async (req, res) => { const {page,limit,offset,search}=require('../utils/listQuery')(req.query,['code']);const where=search?' WHERE code LIKE ? OR name LIKE ?':'',values=search?[`%${search}%`,`%${search}%`]:[];const [[count]]=await req.orgDb.query(`SELECT COUNT(*) total FROM quality_specifications${where}`,{replacements:values});const [rows] = await req.orgDb.query(`SELECT * FROM quality_specifications${where} ORDER BY code LIMIT ? OFFSET ?`,{replacements:[...values,limit,offset]}); return ok(res, rows,'Specifications fetched',{page,limit,total:Number(count.total)}); }));
 router.get('/quality/masters', ...secure('quality', 'can_view'), asyncHandler(async (req, res) => {
   const [specifications] = await req.orgDb.query('SELECT * FROM quality_specifications ORDER BY code');
   const [parameters] = await req.orgDb.query('SELECT * FROM quality_parameters ORDER BY parameter_code');
@@ -70,23 +80,41 @@ for (const [path, type, sourceType] of [['inward','incoming','grn'],['in-process
   }));
   router.post(`/quality/${path}`, ...secure('quality', 'can_create'), asyncHandler(async (req, res) => {
     const quantity = Number(req.body.inspected_qty); if (!req.body.reference_id || !req.body.item_id || !Number.isFinite(quantity) || quantity <= 0) throw Object.assign(new Error('reference_id, item_id and positive inspected_qty are required'), { status: 400, code: 'VALIDATION_ERROR' });
+    await requireInspectionSource(req.orgDb, type, req.body.reference_id, req.body.item_id);
     const accepted = Number(req.body.accepted_qty || 0), rejected = Math.max(0, quantity-accepted), id = require('uuid').v4(), number = req.body.inspection_number || `QC-${Date.now()}-${id.slice(0,6)}`;
+    require('../services/qualityInspection.service').quantities(quantity,accepted,req.body.rejected_qty ?? rejected);
     await req.orgDb.query('INSERT INTO qc_inspections(id,inspection_number,inspection_type,source_type,source_id,reference_id,item_id,inspected_qty,accepted_qty,rejected_qty,overall_result,result,status,notes,inspected_by,inspected_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', { replacements: [id,number,type,sourceType,req.body.reference_id,req.body.reference_id,req.body.item_id,quantity,accepted,rejected,req.body.overall_result||null,req.body.overall_result||null,'pending',req.body.notes||null,req.user?.sub||null,new Date()] });
     return created(res, { id, inspection_number:number, inspection_type:type, source_type:sourceType, status:'pending' });
   }));
 }
 router.get('/quality/rejections', ...secure('quality', 'can_view'), asyncHandler(async (req, res) => {
-  const [rows] = await req.orgDb.query("SELECT * FROM qc_inspections WHERE rejected_qty>0 OR result IN ('failed','rejected','scrap') OR overall_result IN ('fail','failed','rejected') ORDER BY created_at DESC LIMIT 500"); return ok(res, rows);
+  const {page,limit,offset,search}=require('../utils/listQuery')(req.query,['created_at']);const filter="(rejected_qty>0 OR result IN ('failed','fail','rejected','scrap') OR overall_result IN ('fail','failed','rejected'))",where=search?` WHERE ${filter} AND (inspection_number LIKE ? OR item_id LIKE ?)`:` WHERE ${filter}`,values=search?[`%${search}%`,`%${search}%`]:[];const [[count]]=await req.orgDb.query(`SELECT COUNT(*) total FROM qc_inspections${where}`,{replacements:values});const [rows] = await req.orgDb.query(`SELECT * FROM qc_inspections${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,{replacements:[...values,limit,offset]}); return ok(res, rows,'Rejections fetched',{page,limit,total:Number(count.total)});
 }));
-for (const module of ['purchase','sales','quality']) {
+for (const module of ['inventory','production','purchase','sales','quality']) {
   router.get(`/${module}/settings`, ...secure(module, 'can_view'), asyncHandler(async (req, res) => {
-    const [rows] = await req.orgDb.query('SELECT setting_key,setting_value,updated_at FROM company_settings WHERE setting_key LIKE ? ORDER BY setting_key', { replacements: [moduleSettings(module).prefix] }); return ok(res, rows);
+    const {page,limit,offset,search,sort,direction}=require('../utils/listQuery')(req.query,['setting_key','setting_value','updated_at']);
+    const keys=allowedSettings[module].map(key=>`${module}.${key}`);
+    const where='WHERE setting_key IN (?)'+(search?' AND (setting_key LIKE ? OR setting_value LIKE ?)':'');
+    const values=[keys,...(search?[`%${search}%`,`%${search}%`]:[])];
+    const [[count]]=await req.orgDb.query(`SELECT COUNT(*) total FROM company_settings ${where}`,{replacements:values});
+    const [rows] = await req.orgDb.query(`SELECT setting_key,setting_value,updated_at FROM company_settings ${where} ORDER BY ${sort} ${direction} LIMIT ? OFFSET ?`, { replacements: [...values,limit,offset] });
+    return ok(res, rows,'Settings fetched',{page,limit,total:Number(count.total)});
   }));
   router.post(`/${module}/settings`, ...secure(module, 'can_edit'), asyncHandler(async (req, res) => {
     if (!req.body.setting_key || req.body.setting_value === undefined) throw Object.assign(new Error('setting_key and setting_value are required'), { status: 400, code: 'VALIDATION_ERROR' });
     const rawKey = String(req.body.setting_key).replace(`${module}.`,'');
     if (!allowedSettings[module].includes(rawKey)) throw Object.assign(new Error('Unsupported module setting'), { status:400,code:'VALIDATION_ERROR' });
     const key = `${module}.${rawKey}`;
+    const value=String(req.body.setting_value).trim();
+    if (rawKey.endsWith('_enabled') || rawKey.startsWith('require_')) {
+      if (!['true','false','1','0'].includes(value)) throw Object.assign(new Error('Use true or false for this setting'),{status:400,code:'VALIDATION_ERROR'});
+    }
+    if (rawKey==='default_warehouse' || rawKey==='default_quarantine_warehouse') {
+      const [[warehouse]]=await req.orgDb.query('SELECT id FROM warehouses WHERE id=? AND is_active=1',{replacements:[value]});
+      if (!warehouse) throw Object.assign(new Error('Choose an active warehouse'),{status:400,code:'VALIDATION_ERROR'});
+    }
+    if (rawKey==='stock_count_frequency_days' && (!Number.isSafeInteger(Number(value)) || Number(value)<1)) throw Object.assign(new Error('Count frequency must be a positive number of days'),{status:400,code:'VALIDATION_ERROR'});
+    if (rawKey==='scrap_tolerance_percent' && (!Number.isFinite(Number(value)) || Number(value)<0 || Number(value)>100)) throw Object.assign(new Error('Scrap tolerance must be between 0 and 100'),{status:400,code:'VALIDATION_ERROR'});
     await req.orgDb.query('INSERT INTO company_settings(setting_key,setting_value) VALUES(?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)', { replacements: [key, String(req.body.setting_value)] });
     return created(res, { setting_key: key, setting_value: String(req.body.setting_value) });
   }));
@@ -98,7 +126,7 @@ router.get('/sales/reports', ...secure('sales', 'can_view'), asyncHandler(async 
   const [rows] = await req.orgDb.query(`SELECT 'Sales orders' report_type,COUNT(*) record_count,COALESCE(SUM(total_amount),0) total_amount,COALESCE(SUM(CASE WHEN status NOT IN ('cancelled','delivered') THEN total_amount ELSE 0 END),0) open_amount,'All time' period FROM sales_orders UNION ALL SELECT 'Invoices',COUNT(*),COALESCE(SUM(total_amount),0),COALESCE(SUM(balance_amount),0),'All time' FROM invoices UNION ALL SELECT 'Sales returns',COUNT(*),COALESCE(SUM(total_amount),0),0,'All time' FROM sales_returns`); return ok(res, rows);
 }));
 router.get('/sales/receivables', ...secure('sales', 'can_view'), asyncHandler(async (req, res) => {
-  const [rows] = await req.orgDb.query('SELECT i.*,c.company_name FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id WHERE i.balance_amount>0 ORDER BY i.invoice_date DESC LIMIT 500'); return ok(res, rows);
+  const {page,limit,offset,search}=require('../utils/listQuery')(req.query,['invoice_date']);const where=search?' AND (i.invoice_number LIKE ? OR c.company_name LIKE ?)':'',values=search?[`%${search}%`,`%${search}%`]:[];const from=' FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id WHERE i.balance_amount>0';const [[count]]=await req.orgDb.query(`SELECT COUNT(*) total${from}${where}`,{replacements:values});const [rows] = await req.orgDb.query(`SELECT i.*,c.company_name${from}${where} ORDER BY i.invoice_date DESC,i.id LIMIT ? OFFSET ?`,{replacements:[...values,limit,offset]}); return ok(res, rows,'Receivables fetched',{page,limit,total:Number(count.total)});
 }));
 router.get('/quality/reports', ...secure('quality', 'can_view'), asyncHandler(async (req, res) => {
   const [rows] = await req.orgDb.query(`SELECT COALESCE(inspection_type,source_type,'Unclassified') report_type,COUNT(*) record_count,SUM(CASE WHEN COALESCE(result,overall_result) IN ('pass','passed','accepted') THEN 1 ELSE 0 END) passed,SUM(CASE WHEN COALESCE(result,overall_result) IN ('fail','failed','rejected') THEN 1 ELSE 0 END) failed,(SELECT COUNT(*) FROM quality_ncrs WHERE status<>'closed') open_actions,'All time' period FROM qc_inspections GROUP BY COALESCE(inspection_type,source_type,'Unclassified')`); return ok(res, rows);

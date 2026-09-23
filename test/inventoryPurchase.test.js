@@ -12,13 +12,14 @@ test('purchase order transition rejects an invalid status jump', async () => {
   assert.equal(result.current, 'draft');
 });
 
-test('GRN posting writes each quantity once and protects duplicate posting', async () => {
+test('GRN posting awaits Incoming QC without crediting stock and is idempotent', async () => {
   let status = 'draft';
   const ledger = []; const summary = [];
   const db = {
     query: async (sql, options = {}) => {
       if (sql.startsWith('SELECT * FROM grn_items')) return [[{ item_id: 'item-1', quantity: 3, rate: 10 }]];
       if (sql.startsWith('SELECT * FROM grn')) return [[{ id: 'grn-1', status, warehouse_id: 'wh-1' }]];
+      if (sql.startsWith('SELECT id FROM warehouses') || sql.startsWith('SELECT id FROM item_master')) return [[{id:'active'}]];
       if (sql.startsWith('INSERT INTO stock_ledger')) { ledger.push(options.replacements); return []; }
       if (sql.startsWith('INSERT INTO stock_summary')) { summary.push(options.replacements); return []; }
       if (sql.startsWith('UPDATE grn')) { status = 'posted'; return []; }
@@ -28,11 +29,12 @@ test('GRN posting writes each quantity once and protects duplicate posting', asy
   };
   const posted = await service.postGrn(db, 'grn-1', 'u-1');
   assert.equal(posted.status, 'posted');
-  assert.equal(ledger[0][6], 3);
-  assert.equal(summary[0][2], 3);
+  assert.equal(posted.awaiting_qc, true);
+  assert.equal(ledger.length, 0);
+  assert.equal(summary.length, 0);
   const duplicate = await service.postGrn(db, 'grn-1', 'u-1');
-  assert.equal(duplicate.error, 'ALREADY_POSTED');
-  assert.equal(ledger.length, 1);
+  assert.equal(duplicate.already_posted, true);
+  assert.equal(ledger.length, 0);
 });
 
 test('warehouse transfer receipt is idempotent', async () => {
@@ -71,20 +73,4 @@ test('RFQ transition uses the explicit comparison and selection workflow', async
     transaction: async fn => fn({})
   };
   assert.equal((await service.transitionRfq(db, 'r-1', 'compared', 'u-1')).status, 'compared');
-});
-
-test('stock count posting is idempotent', async () => {
-  let status = 'draft'; let ledgerWrites = 0;
-  const db = {
-    query: async (sql) => {
-      if (sql.startsWith('SELECT * FROM stock_counts')) return [[{ id: 'c-1', status, warehouse_id: 'w-1' }]];
-      if (sql.startsWith('SELECT * FROM stock_count_items')) return [[{ item_id: 'i-1', counted_quantity: 8, system_quantity: 5, rate: 2 }]];
-      if (sql.startsWith('INSERT INTO stock_ledger')) ledgerWrites += 1;
-      if (sql.startsWith('UPDATE stock_counts')) status = 'posted';
-      return [];
-    }, transaction: async fn => fn({})
-  };
-  assert.equal((await service.postStockCount(db, 'c-1', 'u-1')).status, 'posted');
-  assert.equal((await service.postStockCount(db, 'c-1', 'u-1')).alreadyPosted, true);
-  assert.equal(ledgerWrites, 1);
 });

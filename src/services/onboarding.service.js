@@ -20,21 +20,30 @@ const provisioningFailureState = error => ({
 });
 
 async function provisionOrganization(input) {
+  require('../utils/provisioningValidation').validateIdentity(input);
+  if (!VALID_PLANS.includes(input.plan)) throw Object.assign(new Error('Choose a valid plan'), {status:400,code:'INVALID_PLAN_SELECTION',details:{plan:'Choose a valid plan'}});
+  const duration = Number(input.duration_months ?? input.durationMonths);
+  if (!Number.isSafeInteger(duration) || duration < 1 || duration > 120) throw Object.assign(new Error('Choose a valid billing duration'), {status:400,code:'INVALID_PLAN_SELECTION',details:{duration_months:'Choose a valid billing duration'}});
   const slug = slugify(input.slug || input.subdomain || input.company_name);
   const id = input.organizationId || uuid();
   const dbName = `org_${slug.replace(/-/g, '_')}`;
   const passwordHash = input.passwordHash || await bcrypt.hash(input.password, 12);
   const transaction = await masterDb.transaction();
   try {
-    const [existing] = await masterDb.query('SELECT id FROM organizations WHERE slug=? OR db_name=? LIMIT 1', {
+    const [existing] = await masterDb.query('SELECT id,status,db_name FROM organizations WHERE slug=? OR db_name=? LIMIT 1', {
       replacements: [slug, dbName], transaction
     });
-    if (existing.length) throw Object.assign(new Error('Organization slug already exists'), { status: 409, code: 'CONFLICT' });
+    if (input.retryExisting) {
+      if(existing.length!==1 || existing[0].id!==id || !['pending','provisioning'].includes(existing[0].status) || existing[0].db_name!==dbName) throw Object.assign(new Error('Organization is not eligible for provisioning retry'),{status:409,code:'PROVISIONING_RETRY_INVALID'});
+      await masterDb.query("UPDATE organizations SET status='provisioning' WHERE id=?",{replacements:[id],transaction});
+      await masterDb.query("UPDATE provisioning_jobs SET status='provisioning',attempts=attempts+1,started_at=NOW(),last_error=NULL WHERE organization_id=?",{replacements:[id],transaction});
+    } else {
+    if (existing.length) throw Object.assign(new Error('Organization slug already exists'), { status: 409, code: 'CONFLICT',details:{slug:'This organization slug is already in use'} });
     await masterDb.query(
       `INSERT INTO organizations
        (id,slug,db_name,company_name,owner_name,owner_email,owner_phone,gstin,state,plan,status,is_active,is_trial)
        VALUES(?,?,?,?,?,?,?,?,?,?,?,1,0)`,
-      { replacements: [id, slug, dbName, input.company_name, input.owner_name || input.company_name, input.owner_email, input.owner_phone || '', input.gstin || null, input.state || null, input.plan || 'free', 'provisioning'], transaction }
+      { replacements: [id, slug, dbName, input.company_name, input.owner_name || input.company_name, input.owner_email, input.owner_phone || '', input.gstin || null, input.state || null, input.plan, 'provisioning'], transaction }
     );
     await masterDb.query('INSERT INTO organization_domains(id,organization_id,hostname,subdomain,is_primary,is_active) VALUES(?,?,?,?,1,1)', {
       replacements: [uuid(), id, hostnameForSubdomain(slug), slug], transaction
@@ -42,6 +51,9 @@ async function provisionOrganization(input) {
     await masterDb.query('INSERT INTO provisioning_jobs(id,organization_id,status) VALUES(?,?,?)', {
       replacements: [uuid(), id, 'provisioning'], transaction
     });
+    await masterDb.query('INSERT INTO pending_organization_accounts(id,organization_id,owner_password_hash) VALUES(?,?,?)',{replacements:[uuid(),id,passwordHash],transaction});
+    await masterDb.query('UPDATE provisioning_jobs SET duration_months=? WHERE organization_id=?',{replacements:[duration,id],transaction});
+    }
     await transaction.commit();
   } catch (error) {
     await transaction.rollback();
@@ -57,16 +69,22 @@ async function provisionOrganization(input) {
       password: process.env.MASTER_DB_PASS || '',
       multipleStatements: true
     });
-    await root.query(`CREATE DATABASE IF NOT EXISTS \`${dbName.replace(/`/g, '')}\``);
+    const [databases] = await root.query('SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=?',[dbName]);
+    if (databases.length && !input.retryExisting) throw Object.assign(new Error('Database name is already allocated; provisioning cannot reuse it'),{status:409,code:'DATABASE_ALREADY_EXISTS'});
+    if(!databases.length) await root.query(`CREATE DATABASE \`${dbName.replace(/`/g, '')}\``);
     await root.changeUser({ database: dbName });
     await applyMigrationsToDb(root, dbName, 'org');
-    const adminId = uuid();
-    await root.query('INSERT INTO users (id,name,email,password_hash,role,is_active) VALUES (?,?,?,?,?,1)', [
+    const [admins] = await root.query('SELECT id FROM users WHERE email=? LIMIT 1', [input.owner_email]);
+    const adminId = admins[0]?.id || uuid();
+    if (!admins.length) await root.query('INSERT INTO users (id,name,email,password_hash,role,is_active) VALUES (?,?,?,?,?,1)', [
       adminId, input.owner_name || input.company_name, input.owner_email, passwordHash, 'admin'
     ]);
     await root.end();
-    await masterDb.query('UPDATE organizations SET status="active",is_active=1 WHERE id=?', { replacements: [id] });
-    await masterDb.query('UPDATE provisioning_jobs SET status="provisioned",completed_at=NOW(),last_error=NULL WHERE organization_id=?', { replacements: [id] });
+    await masterDb.transaction(async transaction => {
+      await masterDb.query('UPDATE organizations SET status="active",is_active=1,is_trial=?,plan_started_at=NOW(),plan_expires_at=DATE_ADD(NOW(),INTERVAL ? MONTH) WHERE id=?', { replacements: [input.plan === 'free' ? 1 : 0,duration,id],transaction });
+      await masterDb.query('UPDATE provisioning_jobs SET status="provisioned",completed_at=NOW(),last_error=NULL WHERE organization_id=?', { replacements: [id],transaction });
+      await masterDb.query('DELETE FROM pending_organization_accounts WHERE organization_id=?',{replacements:[id],transaction});
+    });
     const [orgRows] = await masterDb.query('SELECT id,slug,db_name,company_name,plan FROM organizations WHERE id=?', { replacements: [id] });
     return {
       org: orgRows[0],
@@ -76,7 +94,7 @@ async function provisionOrganization(input) {
   } catch (error) {
     await root?.end().catch(() => {});
     const state = provisioningFailureState(error);
-    await masterDb.query('UPDATE organizations SET status="pending" WHERE id=?', { replacements: [id] }).catch(() => {});
+    await masterDb.query('UPDATE organizations SET status="pending",is_active=0 WHERE id=?', { replacements: [id] }).catch(() => {});
     await masterDb.query(
       'UPDATE provisioning_jobs SET status=?,last_error=?,next_attempt_at=DATE_ADD(NOW(),INTERVAL 5 MINUTE) WHERE organization_id=?',
       { replacements: [state.status, state.last_error, id] }
@@ -85,18 +103,46 @@ async function provisionOrganization(input) {
   }
 }
 
-async function validateSelection({ subdomain, plan, durationMonths, modules = [] }) {
+async function retryProvisionOrganization(organizationId) {
+  const [[org]]=await masterDb.query("SELECT o.*,j.duration_months,a.owner_password_hash FROM organizations o JOIN provisioning_jobs j ON j.organization_id=o.id JOIN pending_organization_accounts a ON a.organization_id=o.id WHERE o.id=? AND o.status='pending' AND j.status='retry_pending'",{replacements:[organizationId]});
+  if(!org) throw Object.assign(new Error('No retryable provisioning job was found'),{status:409,code:'PROVISIONING_RETRY_INVALID'});
+  return provisionOrganization({organizationId:org.id,retryExisting:true,company_name:org.company_name,owner_name:org.owner_name,owner_email:org.owner_email,owner_phone:org.owner_phone,slug:org.slug,plan:org.plan,duration_months:Number(org.duration_months),passwordHash:org.owner_password_hash});
+}
+
+async function validateSelection({ subdomain, plan, plan_code, plan_id, duration_months, durationMonths: legacyDuration, billing_period, modules = [] }) {
+  const invalidPlan = (message,field='plan') => Object.assign(new Error(message),{status:400,code:'INVALID_PLAN_SELECTION',details:{[field]:message}});
+  if (plan && plan_code && plan !== plan_code) throw invalidPlan('Conflicting plan codes');
+  plan = plan || plan_code;
+  if (plan_id !== undefined) {
+    if (!Number.isSafeInteger(Number(plan_id)) || Number(plan_id)<1) throw invalidPlan('Invalid plan price ID','plan_id');
+    const [[offer]] = await masterDb.query('SELECT plan,duration_months FROM plan_pricing WHERE id=? AND is_active=1',{replacements:[Number(plan_id)]});
+    if (!offer) throw invalidPlan('Plan price is unavailable','plan_id');
+    if (plan && plan !== offer.plan) throw invalidPlan('Plan code does not match selected price');
+    if ((duration_months !== undefined && Number(duration_months)!==Number(offer.duration_months)) || (legacyDuration !== undefined && Number(legacyDuration)!==Number(offer.duration_months))) throw invalidPlan('Billing duration does not match selected price','duration_months');
+    plan = offer.plan; duration_months = offer.duration_months;
+  }
+  if (billing_period !== undefined) {
+    const months = {monthly:1,annual:12,yearly:12}[billing_period];
+    if (!months || (duration_months !== undefined && Number(duration_months)!==months) || (legacyDuration !== undefined && Number(legacyDuration)!==months)) throw invalidPlan('Billing period and duration disagree','duration_months');
+    duration_months = months;
+  }
+  // Normalize the API contract once; existing internal callers use durationMonths.
+  if (duration_months !== undefined && legacyDuration !== undefined && Number(duration_months) !== Number(legacyDuration)) {
+    throw invalidPlan('Conflicting billing durations','duration_months');
+  }
+  const durationMonths = Number(duration_months ?? legacyDuration);
+  if (!VALID_PLANS.includes(plan) || !Number.isSafeInteger(durationMonths) || durationMonths < 1 || durationMonths > 120) {
+    throw invalidPlan('Invalid plan or billing cycle',VALID_PLANS.includes(plan)?'duration_months':'plan');
+  }
+  if (!Array.isArray(modules)) throw Object.assign(new Error('modules must be an array'), { status: 400, code: 'INVALID_MODULE_SELECTION' });
   const normalized = slugify(subdomain);
   if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(normalized)) {
     throw Object.assign(new Error('Subdomain must contain 1-63 lowercase letters, numbers or hyphens'), { status: 400, code: 'INVALID_SUBDOMAIN' });
   }
   const [reserved] = await masterDb.query('SELECT subdomain FROM reserved_subdomains WHERE subdomain=?', { replacements: [normalized] });
-  if (reserved.length) throw Object.assign(new Error('This subdomain is reserved'), { status: 409, code: 'RESERVED_SUBDOMAIN' });
+  if (reserved.length) throw Object.assign(new Error('This subdomain is reserved'), { status: 409, code: 'RESERVED_SUBDOMAIN',details:{subdomain:'This subdomain is reserved',slug:'This slug is reserved'} });
   const [domains] = await masterDb.query('SELECT id FROM organization_domains WHERE subdomain=? OR hostname=?', { replacements: [normalized, hostnameForSubdomain(normalized)] });
-  if (domains.length) throw Object.assign(new Error('This subdomain is already in use'), { status: 409, code: 'SUBDOMAIN_ALREADY_EXISTS' });
-  if (!VALID_PLANS.includes(plan) || ![1, 12].includes(Number(durationMonths))) {
-    throw Object.assign(new Error('Invalid plan or billing cycle'), { status: 400, code: 'INVALID_PLAN_SELECTION' });
-  }
+  if (domains.length) throw Object.assign(new Error('This subdomain is already in use'), { status: 409, code: 'SUBDOMAIN_ALREADY_EXISTS',details:{subdomain:'This subdomain is already in use',slug:'This slug is already in use'} });
   const selected = [...new Set(modules.map(String))];
   if (selected.length) {
     const [rows] = await masterDb.query(
@@ -107,8 +153,8 @@ async function validateSelection({ subdomain, plan, durationMonths, modules = []
     const invalid = selected.filter(key => !allowed.has(key));
     if (invalid.length) throw Object.assign(new Error('One or more selected modules are unavailable'), { status: 400, code: 'INVALID_MODULE_SELECTION', details: invalid });
   }
-  const [pricing] = await masterDb.query('SELECT amount FROM plan_pricing WHERE plan=? AND duration_months=? AND is_active=1 LIMIT 1', { replacements: [plan, durationMonths] });
-  if (!pricing.length) throw Object.assign(new Error('Selected plan pricing is unavailable'), { status: 400, code: 'PRICING_UNAVAILABLE' });
+  const pricing = plan==='free' ? [{amount:0}] : (await masterDb.query('SELECT amount FROM plan_pricing WHERE plan=? AND duration_months=? AND is_active=1 LIMIT 1', { replacements: [plan, durationMonths] }))[0];
+  if (!pricing.length) throw Object.assign(new Error('Selected plan pricing is unavailable'), { status: 400, code: 'PRICING_UNAVAILABLE',details:{plan:'Choose an available plan',duration_months:'Choose an available billing duration'} });
   let moduleAmount = 0;
   if (selected.length) {
     const [modulePricing] = await masterDb.query('SELECT module_key,amount FROM module_pricing WHERE module_key IN (?) AND duration_months=? AND is_active=1', { replacements: [selected, durationMonths] });
@@ -121,6 +167,7 @@ async function validateSelection({ subdomain, plan, durationMonths, modules = []
 }
 
 async function createPendingOrganization(input) {
+  require('../utils/provisioningValidation').validateIdentity(input);
   const selection = await validateSelection(input);
   const organizationId = uuid();
   const subscriptionId = uuid();
@@ -197,6 +244,7 @@ async function activatePendingOrganization({ subscription, paymentId }) {
     }
     await root.end();
     const months = Math.max(1, Math.floor(Number(subscription.duration_months)));
+    const [items] = await masterDb.query('SELECT module_key FROM subscription_items WHERE subscription_id=?', { replacements: [subscription.id] });
     const tx = await masterDb.transaction();
     try {
       await masterDb.query('UPDATE subscriptions SET status="active",provider_payment_id=?,starts_at=COALESCE(starts_at,NOW()),expires_at=DATE_ADD(NOW(), INTERVAL duration_months MONTH) WHERE id=?', { replacements: [paymentId, subscription.id], transaction: tx });
@@ -205,13 +253,13 @@ async function activatePendingOrganization({ subscription, paymentId }) {
           `UPDATE provisioning_jobs SET status='provisioned', completed_at=NOW(), last_error=NULL WHERE organization_id=?`,
           { replacements: [organization.id], transaction: tx }
         );
+      for (const item of items) await masterDb.query('INSERT INTO org_modules(org_id,module_key,is_active) VALUES(?,?,1) ON DUPLICATE KEY UPDATE is_active=1', { replacements: [organization.id, item.module_key], transaction: tx });
+      await masterDb.query('DELETE FROM pending_organization_accounts WHERE organization_id=?', { replacements: [organization.id], transaction: tx });
       await tx.commit();
     } catch (error) {
       await tx.rollback();
       throw error;
     }
-    const [items] = await masterDb.query('SELECT module_key FROM subscription_items WHERE subscription_id=?', { replacements: [subscription.id] });
-    for (const item of items) await masterDb.query('INSERT INTO org_modules(org_id,module_key,is_active) VALUES(?,?,1) ON DUPLICATE KEY UPDATE is_active=1', { replacements: [organization.id, item.module_key] });
     return { activated: true, organization_id: organization.id, slug: organization.slug, admin_id: adminId };
   } catch (error) {
     await masterDb.query(
@@ -279,6 +327,6 @@ async function processPaymentWebhook(rawBody, signature) {
 
 module.exports = {
   provisionOrganization, createPendingOrganization, createPendingOrder, verifyPendingPayment,
-  processPaymentWebhook, validateSelection, activatePendingOrganization, isPaymentAlreadyProcessed,
+  processPaymentWebhook, validateSelection, activatePendingOrganization, isPaymentAlreadyProcessed, retryProvisionOrganization,
   provisioningFailureState
 };

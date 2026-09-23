@@ -32,7 +32,7 @@ async function getDemandForecast(orgDb, itemId = null) {
       MONTH(so.created_at) as mo,
       COALESCE(SUM(soi.quantity), 0) as total_qty
     FROM sales_order_items soi
-    JOIN sales_orders so ON so.id = soi.order_id
+    JOIN sales_orders so ON so.id = soi.so_id
     JOIN item_master im ON im.id = soi.item_id
     WHERE so.created_at >= DATE_SUB(CURDATE(), INTERVAL 14 MONTH)
       ${itemFilter}

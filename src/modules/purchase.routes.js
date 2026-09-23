@@ -126,21 +126,6 @@ router.put('/requisitions/:id', permission('purchase', 'can_edit'), asyncHandler
   return ok(res, { id: req.params.id }, 'Requisition updated');
 }));
 
-router.post('/requisitions/:id/submit', permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
-  const [pr] = await req.orgDb.query('SELECT status FROM purchase_requisitions WHERE id = ?', { replacements: [req.params.id] });
-  if (!pr.length) return fail(res, 404, 'NOT_FOUND', 'Requisition not found');
-  
-  if (pr[0].status !== 'draft') {
-    return fail(res, 400, 'INVALID_STATE', 'Only draft requisitions can be submitted');
-  }
-  
-  await req.orgDb.query('UPDATE purchase_requisitions SET status = ? WHERE id = ?', {
-    replacements: ['submitted', req.params.id]
-  });
-  
-  return ok(res, { id: req.params.id, status: 'submitted' }, 'Requisition submitted');
-}));
-
 router.post('/requisitions/:id/approve', permission('purchase', 'can_approve'), asyncHandler(async (req, res) => {
   const [pr] = await req.orgDb.query('SELECT status FROM purchase_requisitions WHERE id = ?', { replacements: [req.params.id] });
   if (!pr.length) return fail(res, 404, 'NOT_FOUND', 'Requisition not found');
@@ -252,7 +237,7 @@ router.post('/orders', permission('purchase', 'can_create'), asyncHandler(async 
     
     for (const item of items) {
       await req.orgDb.query(`
-        INSERT INTO purchase_order_items(id, po_id, item_id, quantity, rate, discount_percent, tax_percent)
+        INSERT INTO purchase_order_items(id, order_id, item_id, quantity, rate, discount_percent, tax_percent)
         VALUES(?, ?, ?, ?, ?, ?, ?)
       `, {
         replacements: [uuid(), poId, item.item_id, item.quantity, item.rate, item.discount_percent || 0, item.tax_percent || 0],
@@ -282,25 +267,10 @@ router.get('/orders/:id', permission('purchase', 'can_view'), asyncHandler(async
     SELECT poi.*, im.item_code, im.item_name
     FROM purchase_order_items poi
     LEFT JOIN item_master im ON im.id = poi.item_id
-    WHERE poi.po_id = ?
+    WHERE poi.order_id = ?
   `, { replacements: [req.params.id] });
   
   return ok(res, { ...po[0], items });
-}));
-
-router.post('/orders/:id/approve', permission('purchase', 'can_approve'), asyncHandler(async (req, res) => {
-  const [po] = await req.orgDb.query('SELECT status FROM purchase_orders WHERE id = ?', { replacements: [req.params.id] });
-  if (!po.length) return fail(res, 404, 'NOT_FOUND', 'Purchase order not found');
-  
-  if (po[0].status !== 'draft') {
-    return fail(res, 400, 'INVALID_STATE', 'Only draft purchase orders can be approved');
-  }
-  
-  await req.orgDb.query('UPDATE purchase_orders SET status = ? WHERE id = ?', {
-    replacements: ['approved', req.params.id]
-  });
-  
-  return ok(res, { id: req.params.id, status: 'approved' }, 'Purchase order approved');
 }));
 
 router.post('/orders/:id/cancel', permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
@@ -365,13 +335,22 @@ router.post('/receipts', permission('purchase', 'can_create'), asyncHandler(asyn
   }
   
   for (const item of items) {
-    if (!item.item_id || Number(item.received_qty) < 0) {
-      return fail(res, 400, 'VALIDATION_ERROR', 'Each item must have item_id and non-negative received_qty');
+    if (!item.item_id || !Number.isFinite(Number(item.received_qty)) || Number(item.received_qty) <= 0 || !Number.isFinite(Number(item.rate || 0)) || Number(item.rate || 0) < 0) {
+      return fail(res, 400, 'VALIDATION_ERROR', 'Each item must have item_id, positive received_qty and a non-negative rate');
     }
   }
   
   const tx = await req.orgDb.transaction();
   try {
+    const [[vendor]]=await req.orgDb.query('SELECT id FROM vendors WHERE id=? AND is_active=1',{replacements:[vendor_id],transaction:tx});
+    const [[warehouse]]=await req.orgDb.query('SELECT id FROM warehouses WHERE id=? AND is_active=1',{replacements:[warehouse_id || null],transaction:tx});
+    if(!vendor || !warehouse) throw Object.assign(new Error('Choose an active vendor and warehouse'),{status:400,code:'VALIDATION_ERROR'});
+    let orderLines=[];
+    if(po_id) {
+      const [[order]]=await req.orgDb.query("SELECT id,vendor_id,warehouse_id,status FROM purchase_orders WHERE id=? FOR UPDATE",{replacements:[po_id],transaction:tx});
+      if(!order || order.vendor_id!==vendor_id || order.warehouse_id!==warehouse_id || !['approved','part_received'].includes(order.status)) throw Object.assign(new Error('Receipt must match an approved purchase order, vendor and warehouse'),{status:409,code:'INVALID_RECEIPT'});
+      [orderLines]=await req.orgDb.query('SELECT id,item_id,quantity FROM purchase_order_items WHERE order_id=?',{replacements:[po_id],transaction:tx});
+    }
     const grnId = uuid();
     const grnNumber = `GRN-${Date.now()}`;
     
@@ -384,11 +363,19 @@ router.post('/receipts', permission('purchase', 'can_create'), asyncHandler(asyn
     });
     
     for (const item of items) {
+      let poItemId=null;
+      if(po_id) {
+        const matches=orderLines.filter(line=>line.item_id===item.item_id);
+        if(matches.length!==1) throw Object.assign(new Error('Each receipt item must unambiguously match one purchase order line'),{status:409,code:'INVALID_RECEIPT'});
+        poItemId=matches[0].id;
+        const [[received]]=await req.orgDb.query("SELECT COALESCE(SUM(gi.quantity),0) quantity FROM grn_items gi JOIN grn g ON g.id=gi.grn_id WHERE gi.po_item_id=? AND g.status<>'cancelled' FOR UPDATE",{replacements:[poItemId],transaction:tx});
+        if(Number(received.quantity)+Number(item.received_qty)>Number(matches[0].quantity)) throw Object.assign(new Error('Receipt quantity exceeds the purchase order line'),{status:409,code:'INVALID_RECEIPT'});
+      }
       await req.orgDb.query(`
-        INSERT INTO grn_items(id, grn_id, item_id, quantity, rate)
-        VALUES(?, ?, ?, ?, ?)
+        INSERT INTO grn_items(id, grn_id, po_item_id, item_id, quantity, rate)
+        VALUES(?, ?, ?, ?, ?, ?)
       `, {
-        replacements: [uuid(), grnId, item.item_id, item.received_qty, item.rate || 0],
+        replacements: [uuid(), grnId, poItemId, item.item_id, item.received_qty, item.rate || 0],
         transaction: tx
       });
     }
@@ -422,70 +409,10 @@ router.get('/receipts/:id', permission('purchase', 'can_view'), asyncHandler(asy
   return ok(res, { ...grn[0], items });
 }));
 
-router.post('/receipts/:id/post', permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
-  const [grn] = await req.orgDb.query('SELECT status, warehouse_id FROM grn WHERE id = ?', { replacements: [req.params.id] });
-  if (!grn.length) return fail(res, 404, 'NOT_FOUND', 'GRN not found');
-  
-  if (grn[0].status !== 'draft') {
-    return fail(res, 400, 'INVALID_STATE', 'Only draft GRN can be posted');
-  }
-  
-  const tx = await req.orgDb.transaction();
-  try {
-    const warehouseId = grn[0].warehouse_id;
-    if (!warehouseId) {
-      await tx.rollback();
-      return fail(res, 400, 'MISSING_WAREHOUSE', 'Warehouse is required');
-    }
-    
-    const [items] = await req.orgDb.query('SELECT * FROM grn_items WHERE grn_id = ?', { replacements: [req.params.id], transaction: tx });
-    
-    for (const item of items) {
-      
-      // Update stock summary
-      const [result] = await req.orgDb.query(`
-        INSERT INTO stock_summary(item_id, warehouse_id, current_qty, avg_rate, total_value, last_updated)
-        VALUES(?, ?, ?, ?, ?, NOW())
-        ON DUPLICATE KEY UPDATE
-          current_qty = current_qty + ?,
-          avg_rate = (avg_rate * (current_qty) + ? * ?) / (current_qty + ?),
-          total_value = total_value + ?,
-          last_updated = NOW()
-      `, {
-        replacements: [
-          item.item_id, warehouseId, item.quantity, item.rate, item.quantity * item.rate,
-          item.quantity, item.rate, item.quantity, item.quantity,
-          item.quantity * item.rate
-        ],
-        transaction: tx
-      });
-      
-      if (!result.affectedRows) {
-        await tx.rollback();
-        return fail(res, 400, 'STOCK_UPDATE_FAILED', `Failed to update stock for item ${item.item_id}`);
-      }
-      
-      // Create stock ledger entry
-      await req.orgDb.query(`
-        INSERT INTO stock_ledger(id, item_id, warehouse_id, transaction_type, reference_type, reference_id, qty_in, balance_qty, rate, amount, transaction_date)
-        VALUES(?, ?, ?, 'purchase_receipt', 'grn', ?, ?, ?, ?, ?, NOW())
-      `, {
-        replacements: [uuid(), item.item_id, warehouseId, req.params.id, item.quantity, item.quantity, item.rate, item.quantity * item.rate],
-        transaction: tx
-      });
-    }
-    
-    await req.orgDb.query('UPDATE grn SET status = ?, posted_at = NOW() WHERE id = ?', {
-      replacements: ['posted', req.params.id],
-      transaction: tx
-    });
-    
-    await tx.commit();
-    return ok(res, { id: req.params.id, status: 'posted' }, 'GRN posted and inventory updated');
-  } catch (error) {
-    await tx.rollback();
-    throw error;
-  }
+router.post('/receipts/:id/post',permission('purchase','can_edit'),asyncHandler(async(req,res)=>{
+  const result=await require('./inventoryPurchase.service').postGrn(req.orgDb,req.params.id,req.user.sub,req.body);
+  if(result.error) return fail(res,result.error==='NOT_FOUND'?404:409,result.error,'Receipt cannot be posted');
+  return ok(res,result,'Receipt posted; accepted stock is released by Incoming QC');
 }));
 
 // ============ PURCHASE RETURNS ============
@@ -536,6 +463,18 @@ router.post('/returns', permission('purchase', 'can_create'), asyncHandler(async
   
   const tx = await req.orgDb.transaction();
   try {
+    const [[vendor]]=await req.orgDb.query('SELECT id FROM vendors WHERE id=? AND is_active=1',{replacements:[vendor_id],transaction:tx});
+    const [[warehouse]]=await req.orgDb.query('SELECT id FROM warehouses WHERE id=? AND is_active=1',{replacements:[warehouse_id || null],transaction:tx});
+    if(!vendor || !warehouse) throw Object.assign(new Error('Choose an active vendor and warehouse'),{status:400,code:'VALIDATION_ERROR'});
+    if(grn_id) {
+      const [[grn]]=await req.orgDb.query("SELECT id,vendor_id,warehouse_id FROM grn WHERE id=? AND status='posted' FOR UPDATE",{replacements:[grn_id],transaction:tx});
+      if(!grn || grn.vendor_id!==vendor_id || grn.warehouse_id!==warehouse_id) throw Object.assign(new Error('Return must match a posted receipt, vendor and warehouse'),{status:409,code:'INVALID_RETURN'});
+      for(const item of items) {
+        const [[accepted]]=await req.orgDb.query("SELECT COALESCE(SUM(accepted_qty),0) quantity FROM qc_inspections WHERE inspection_type='incoming' AND COALESCE(reference_id,source_id)=? AND item_id=? AND status IN ('processed','closed') FOR UPDATE",{replacements:[grn_id,item.item_id],transaction:tx});
+        const [[returned]]=await req.orgDb.query("SELECT COALESCE(SUM(pri.quantity),0) quantity FROM purchase_return_items pri JOIN purchase_returns pr ON pr.id=pri.return_id WHERE pr.grn_id=? AND pri.item_id=? AND pr.status<>'cancelled' FOR UPDATE",{replacements:[grn_id,item.item_id],transaction:tx});
+        if(Number(returned.quantity)+Number(item.return_qty)>Number(accepted.quantity)) throw Object.assign(new Error('Return quantity exceeds QC-accepted receipt quantity'),{status:409,code:'INVALID_RETURN'});
+      }
+    }
     const returnId = uuid();
     const returnNumber = `PR-RET-${Date.now()}`;
     
@@ -549,10 +488,10 @@ router.post('/returns', permission('purchase', 'can_create'), asyncHandler(async
     
     for (const item of items) {
       await req.orgDb.query(`
-        INSERT INTO purchase_return_items(id, return_id, item_id, quantity)
-        VALUES(?, ?, ?, ?)
+        INSERT INTO purchase_return_items(id, return_id, item_id, quantity, rate)
+        VALUES(?, ?, ?, ?, ?)
       `, {
-        replacements: [uuid(), returnId, item.item_id, item.return_qty],
+        replacements: [uuid(), returnId, item.item_id, item.return_qty, Number(item.rate || 0)],
         transaction: tx
       });
     }
@@ -566,15 +505,12 @@ router.post('/returns', permission('purchase', 'can_create'), asyncHandler(async
 }));
 
 router.post('/returns/:id/post', permission('purchase', 'can_edit'), asyncHandler(async (req, res) => {
-  const [ret] = await req.orgDb.query('SELECT status, warehouse_id FROM purchase_returns WHERE id = ?', { replacements: [req.params.id] });
-  if (!ret.length) return fail(res, 404, 'NOT_FOUND', 'Purchase return not found');
-  
-  if (ret[0].status !== 'draft') {
-    return fail(res, 400, 'INVALID_STATE', 'Only draft returns can be posted');
-  }
-  
   const tx = await req.orgDb.transaction();
   try {
+    const [ret] = await req.orgDb.query('SELECT status, warehouse_id FROM purchase_returns WHERE id = ? FOR UPDATE', { replacements: [req.params.id],transaction:tx });
+    if (!ret.length) { await tx.rollback(); return fail(res,404,'NOT_FOUND','Return not found'); }
+    if (ret[0].status === 'posted') { await tx.commit(); return ok(res,{id:req.params.id,status:'posted',already_applied:true}); }
+    if (ret[0].status !== 'draft') { await tx.rollback(); return fail(res,409,'INVALID_STATE','Only draft returns can be posted'); }
     const warehouseId = ret[0].warehouse_id;
     if (!warehouseId) {
       await tx.rollback();
@@ -583,42 +519,15 @@ router.post('/returns/:id/post', permission('purchase', 'can_edit'), asyncHandle
     
     const [items] = await req.orgDb.query('SELECT * FROM purchase_return_items WHERE return_id = ?', { replacements: [req.params.id], transaction: tx });
     
+    if(!items.length) throw Object.assign(new Error('Return requires items'),{status:400,code:'VALIDATION_ERROR'});
+    let total=0;
     for (const item of items) {
-      
-      // Check stock exists and is sufficient
-      const [stock] = await req.orgDb.query('SELECT current_qty FROM stock_summary WHERE item_id = ? AND warehouse_id = ?', { replacements: [item.item_id, warehouseId], transaction: tx });
-      
-      if (!stock.length || stock[0].current_qty < item.quantity) {
-        await tx.rollback();
-        return fail(res, 400, 'INSUFFICIENT_STOCK', `Insufficient stock for item ${item.item_id}`);
-      }
-      
-      // Decrease stock
-      const [result] = await req.orgDb.query(`
-        UPDATE stock_summary
-        SET current_qty = current_qty - ?,
-            total_value = total_value - (? * avg_rate),
-            last_updated = NOW()
-        WHERE item_id = ? AND warehouse_id = ?
-      `, {
-        replacements: [item.quantity, item.quantity, item.item_id, warehouseId],
-        transaction: tx
-      });
-      
-      if (!result.affectedRows) {
-        await tx.rollback();
-        return fail(res, 400, 'STOCK_UPDATE_FAILED', `Failed to decrease stock for item ${item.item_id}`);
-      }
-      
-      // Create stock ledger entry
-      await req.orgDb.query(`
-        INSERT INTO stock_ledger(id, item_id, warehouse_id, transaction_type, reference_type, reference_id, qty_out, balance_qty, transaction_date)
-        VALUES(?, ?, ?, 'purchase_return', 'purchase_return', ?, ?, ?, NOW())
-      `, {
-        replacements: [uuid(), item.item_id, warehouseId, req.params.id, item.quantity, item.quantity],
-        transaction: tx
-      });
+      const qty=Number(item.quantity),rate=Number(item.rate || 0);
+      if(!Number.isFinite(qty)||qty<=0||!Number.isFinite(rate)||rate<0) throw Object.assign(new Error('Invalid return quantity or rate'),{status:400,code:'VALIDATION_ERROR'});
+      total+=qty*rate;
+      await require('../services/zeroGapClosure.service').applyStockEffect(req.orgDb,{operationKey:`purchase-return:${req.params.id}:${item.id}`,referenceType:'purchase_return',referenceId:req.params.id,itemId:item.item_id,warehouseId,quantity:qty,rate,direction:'out',userId:req.user.sub,transaction:tx});
     }
+    await require('../services/accounting.service').postReturnEffect(req.orgDb,'purchase',req.params.id,total,req.user.sub,tx);
     
     await req.orgDb.query('UPDATE purchase_returns SET status = ?, posted_at = NOW() WHERE id = ?', {
       replacements: ['posted', req.params.id],
