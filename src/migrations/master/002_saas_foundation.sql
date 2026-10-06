@@ -8,11 +8,20 @@ CREATE TABLE IF NOT EXISTS reserved_subdomains (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT IGNORE INTO reserved_subdomains(subdomain, reason) VALUES
-('www','Platform website'),('admin','Platform administration'),('api','Platform API'),
-('app','Platform application'),('mail','Email service'),('smtp','Email service'),
-('ftp','Reserved infrastructure'),('support','Support portal'),('billing','Billing portal'),
-('static','Static assets'),('assets','Static assets'),('cdn','Content delivery');
+INSERT IGNORE INTO reserved_subdomains (subdomain, reason)
+VALUES
+  ('www', 'Platform website'),
+  ('admin', 'Platform administration'),
+  ('api', 'Platform API'),
+  ('app', 'Platform application'),
+  ('mail', 'Email service'),
+  ('smtp', 'Email service'),
+  ('ftp', 'Reserved infrastructure'),
+  ('support', 'Support portal'),
+  ('billing', 'Billing portal'),
+  ('static', 'Static assets'),
+  ('assets', 'Static assets'),
+  ('cdn', 'Content delivery');
 
 CREATE TABLE IF NOT EXISTS organization_domains (
   id VARCHAR(36) PRIMARY KEY,
@@ -27,7 +36,7 @@ CREATE TABLE IF NOT EXISTS organization_domains (
   CONSTRAINT fk_organization_domains_org FOREIGN KEY (organization_id) REFERENCES organizations(id)
 );
 
-INSERT INTO organization_domains(id, organization_id, hostname, subdomain, is_primary, is_active)
+INSERT INTO organization_domains (id, organization_id, hostname, subdomain, is_primary, is_active)
 SELECT UUID(), o.id, CONCAT(o.slug, '.daanoday.com'), o.slug, 1, 1
 FROM organizations o
 LEFT JOIN organization_domains d ON d.organization_id = o.id
@@ -66,8 +75,9 @@ CREATE TABLE IF NOT EXISTS module_catalog (
   CONSTRAINT fk_module_catalog_module FOREIGN KEY (module_key) REFERENCES modules(module_key)
 );
 
-INSERT IGNORE INTO module_catalog(module_key, description, category, display_order)
-SELECT module_key, module_name, 'ERP', sort_order FROM modules;
+INSERT IGNORE INTO module_catalog (module_key, description, category, display_order)
+SELECT module_key, module_name, 'ERP', sort_order
+FROM modules;
 
 CREATE TABLE IF NOT EXISTS module_features (
   id VARCHAR(36) PRIMARY KEY,
@@ -87,7 +97,7 @@ CREATE TABLE IF NOT EXISTS module_pricing (
   id VARCHAR(36) PRIMARY KEY,
   module_key VARCHAR(50) NOT NULL,
   duration_months INT NOT NULL,
-  amount DECIMAL(12,2) NOT NULL,
+  amount DECIMAL(12, 2) NOT NULL,
   currency VARCHAR(3) NOT NULL DEFAULT 'INR',
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

@@ -74,7 +74,9 @@ async function handleSalesOrderConfirmed(orgDb, salesOrderId, userId) {
     'SELECT * FROM sales_orders WHERE id = ?',
     { replacements: [salesOrderId] },
   );
-  if (!orders.length) return { triggered: false, reason: 'ORDER_NOT_FOUND' };
+  if (!orders.length) {
+    return { triggered: false, reason: 'ORDER_NOT_FOUND' };
+  }
   const order = orders[0];
 
   const [soItems] = await orgDb.query(
@@ -108,7 +110,9 @@ async function handleSalesOrderConfirmed(orgDb, salesOrderId, userId) {
 
       let remainingToReserve = neededQty;
       for (const st of stocks) {
-        if (remainingToReserve <= 0) break;
+        if (remainingToReserve <= 0) {
+          break;
+        }
         const available = Math.max(
           0,
           Number(st.current_qty) - Number(st.reserved_qty),
@@ -148,7 +152,9 @@ async function handleSalesOrderConfirmed(orgDb, salesOrderId, userId) {
       { replacements: [item.item_id] },
     );
 
-    if (!boms.length) continue;
+    if (!boms.length) {
+      continue;
+    }
     const bom = boms[0];
 
     // 1.1 Auto-create Work Order
@@ -370,7 +376,9 @@ async function handleQcInspectionResult(orgDb, qcInspectionId, userId) {
  */
 async function handleDeliveryChallanSaved(orgDb, challanId, userId) {
   const rules = await getAutomationRules(orgDb);
-  if (!rules.auto_invoice_on_dispatch) return { triggered: false };
+  if (!rules.auto_invoice_on_dispatch) {
+    return { triggered: false };
+  }
   try {
     const invoice = await require('./invoice.service').createInvoice(
       orgDb,
@@ -379,8 +387,9 @@ async function handleDeliveryChallanSaved(orgDb, challanId, userId) {
     );
     return { triggered: true, ...invoice, invoice_id: invoice.id };
   } catch (cause) {
-    if (cause.code === 'INVOICE_CONFLICT')
+    if (cause.code === 'INVOICE_CONFLICT') {
       return { triggered: false, reason: cause.message };
+    }
     throw cause;
   }
 }

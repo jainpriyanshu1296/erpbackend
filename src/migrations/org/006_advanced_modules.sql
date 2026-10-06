@@ -5,7 +5,7 @@
 
 -- 1. Anti-Double-Selling: Stock Reservation column
 ALTER TABLE stock_summary
-  ADD COLUMN reserved_qty DECIMAL(10,3) DEFAULT 0;
+  ADD COLUMN reserved_qty DECIMAL(10, 3) DEFAULT 0;
 
 -- 2. Vendor Debit Notes on QC Rejection
 CREATE TABLE IF NOT EXISTS debit_notes (
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS debit_notes (
   vendor_id VARCHAR(36) NOT NULL,
   reference_type VARCHAR(50),
   reference_id VARCHAR(36),
-  total_amount DECIMAL(14,2) DEFAULT 0,
+  total_amount DECIMAL(14, 2) DEFAULT 0,
   reason TEXT,
   status VARCHAR(30) DEFAULT 'draft',
   created_by VARCHAR(36),
@@ -27,9 +27,9 @@ CREATE TABLE IF NOT EXISTS debit_note_items (
   id VARCHAR(36) PRIMARY KEY,
   debit_note_id VARCHAR(36) NOT NULL,
   item_id VARCHAR(36) NOT NULL,
-  quantity DECIMAL(14,3) NOT NULL,
-  rate DECIMAL(14,2) DEFAULT 0,
-  amount DECIMAL(14,2) DEFAULT 0,
+  quantity DECIMAL(14, 3) NOT NULL,
+  rate DECIMAL(14, 2) DEFAULT 0,
+  amount DECIMAL(14, 2) DEFAULT 0,
   reason VARCHAR(255),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_dni_note (debit_note_id)
@@ -58,8 +58,8 @@ CREATE TABLE IF NOT EXISTS delivery_challan_items (
   challan_id VARCHAR(36) NOT NULL,
   order_item_id VARCHAR(36) NULL,
   item_id VARCHAR(36) NOT NULL,
-  quantity DECIMAL(14,3) NOT NULL,
-  rate DECIMAL(14,2) DEFAULT 0,
+  quantity DECIMAL(14, 3) NOT NULL,
+  rate DECIMAL(14, 2) DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_dci_challan (challan_id)
 );

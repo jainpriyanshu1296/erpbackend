@@ -2,8 +2,9 @@ const { v4: uuid } = require('uuid');
 const { nextNumber } = require('./erp.service');
 function calculateMRP(demand, onHand, scheduled = 0, safetyStock = 0) {
   const values = [demand, onHand, scheduled, safetyStock].map(Number);
-  if (values.some((v) => !Number.isFinite(v) || v < 0))
+  if (values.some((v) => !Number.isFinite(v) || v < 0)) {
     throw invalid('MRP quantities must be non-negative numbers');
+  }
   return Math.max(0, values[0] + values[3] - values[1] - values[2]);
 }
 function resolveOutputQuantity(
@@ -14,14 +15,16 @@ function resolveOutputQuantity(
   const planned = Number(plannedQuantity);
   const produced = Number(producedQuantity);
   const requested = Number(requestedQuantity);
-  if (!Number.isFinite(planned) || planned <= 0)
+  if (!Number.isFinite(planned) || planned <= 0) {
     throw invalid('Work order planned quantity must be positive');
+  }
   const output =
     Number.isFinite(produced) && produced > 0 ? produced : requested;
-  if (!Number.isFinite(output) || output <= 0 || output > planned)
+  if (!Number.isFinite(output) || output <= 0 || output > planned) {
     throw invalid(
       'Work order output must be positive and cannot exceed planned quantity',
     );
+  }
   return output;
 }
 function assertProductionLink(link, order, planned) {
@@ -73,7 +76,9 @@ function invalid(message, code = 'VALIDATION_ERROR') {
 }
 
 async function transition(db, table, id, next, userId) {
-  if (!transitions[table]) throw invalid('Unsupported workflow');
+  if (!transitions[table]) {
+    throw invalid('Unsupported workflow');
+  }
   const tx = await db.transaction();
   try {
     const [rows] = await db.query(
@@ -330,11 +335,11 @@ async function issueMaterials(
     }
     if (!warehouseId || !['released', 'in_progress'].includes(orders[0].status))
       throw invalid('A released work order and warehouse are required');
-    const order = orders[0],
-      [components] = await db.query(
-        'SELECT item_id,quantity,scrap_percent FROM bom_components WHERE bom_id=?',
-        { replacements: [order.bom_id], transaction: tx },
-      );
+    const order = orders[0];
+    const [components] = await db.query(
+      'SELECT item_id,quantity,scrap_percent FROM bom_components WHERE bom_id=?',
+      { replacements: [order.bom_id], transaction: tx },
+    );
     const output = Number(order.planned_qty || 0);
     if (
       !Number.isFinite(output) ||
@@ -649,7 +654,9 @@ async function releaseProductionOrder(db, id, userId) {
       'SELECT * FROM production_orders WHERE id=? FOR UPDATE',
       [id],
     );
-    if (!order) throw invalid('Production order not found');
+    if (!order) {
+      throw invalid('Production order not found');
+    }
     const [[existing]] = await query(
       "SELECT target_id FROM related_documents WHERE source_type='production_order' AND source_id=? AND target_type='work_order' AND relation='execution'",
       [id],
@@ -665,15 +672,27 @@ async function releaseProductionOrder(db, id, userId) {
       [order.bom_id, order.item_id],
     );
     const [components] = await query(
-      'SELECT item_id,quantity FROM bom_components WHERE bom_id=?',
+      'SELECT bc.item_id,bc.quantity,bc.scrap_percent,im.is_active FROM bom_components bc LEFT JOIN item_master im ON im.id=bc.item_id WHERE bc.bom_id=?',
       [order.bom_id],
     );
-    if (!bom || !components.length || Number(order.planned_qty) <= 0)
+    const validQuantity = (value) => Number.isFinite(Number(value)) && Number(value) > 0;
+    if (
+      !bom ||
+      !validQuantity(order.planned_qty) ||
+      !validQuantity(bom.output_qty) ||
+      !components.length ||
+      components.some((component) =>
+        !component.is_active ||
+        !validQuantity(component.quantity) ||
+        !Number.isFinite(Number(component.scrap_percent || 0)) ||
+        Number(component.scrap_percent || 0) < 0
+      )
+    )
       throw invalid(
-        'Production requires a matching active BOM with components',
+        'Production requires a matching active BOM, positive quantities and active components',
       );
-    const workId = uuid(),
-      cardId = uuid();
+    const workId = uuid();
+    const cardId = uuid();
     await query(
       "INSERT INTO work_orders(id,wo_number,finished_item_id,bom_id,planned_qty,status,so_id) VALUES(?,?,?,?,?,'released',?)",
       [
@@ -710,7 +729,9 @@ async function releaseProductionOrder(db, id, userId) {
 }
 
 async function createSalesOrderFromQuotation(db, quotationId) {
-  if (!quotationId) throw invalid('quotation_id is required');
+  if (!quotationId) {
+    throw invalid('quotation_id is required');
+  }
   const tx = await db.transaction();
   try {
     const [[quote]] = await db.query(
@@ -745,13 +766,15 @@ async function createSalesOrderFromQuotation(db, quotationId) {
       'SELECT * FROM quotation_items WHERE quotation_id=? ORDER BY id',
       { replacements: [quotationId], transaction: tx },
     );
-    if (!source.length) throw invalid('Quotation has no items');
+    if (!source.length) {
+      throw invalid('Quotation has no items');
+    }
     if (new Set(source.map((item) => item.item_id)).size !== source.length)
       throw invalid(
         'Quotation contains duplicate item lines and must be corrected before conversion',
       );
-    const id = uuid(),
-      number = await nextNumber(db, 'sales_order', 'SO-', 5, tx);
+    const id = uuid();
+    const number = await nextNumber(db, 'sales_order', 'SO-', 5, tx);
     await db.query(
       "INSERT INTO sales_orders(id,so_number,quotation_id,customer_id,status,total_amount) VALUES(?,?,?,?,'confirmed',?)",
       {

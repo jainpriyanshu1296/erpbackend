@@ -60,8 +60,9 @@ router.post(
   asyncHandler(async (req, res) => {
     const { customer_id, items, valid_until, notes } = req.body;
 
-    if (!customer_id)
+    if (!customer_id) {
       return fail(res, 400, 'VALIDATION_ERROR', 'customer_id is required');
+    }
     if (!items || !Array.isArray(items) || items.length === 0) {
       return fail(
         res,
@@ -70,19 +71,20 @@ router.post(
         'At least one item is required',
       );
     }
-    if (new Set(items.map((item) => item.item_id)).size !== items.length)
+    if (new Set(items.map((item) => item.item_id)).size !== items.length) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'Each quotation item may appear only once',
       );
+    }
 
     for (const item of items) {
-      const quantity = Number(item.quantity),
-        rate = Number(item.rate),
-        discount = Number(item.discount_percent || 0),
-        gst = Number(item.gst_rate ?? 18);
+      const quantity = Number(item.quantity);
+      const rate = Number(item.rate);
+      const discount = Number(item.discount_percent || 0);
+      const gst = Number(item.gst_rate ?? 18);
       if (
         !item.item_id ||
         !Number.isFinite(quantity) ||
@@ -111,11 +113,12 @@ router.post(
         'SELECT id FROM customers WHERE id=? AND is_active=1',
         { replacements: [customer_id], transaction: tx },
       );
-      if (!customer)
+      if (!customer) {
         throw Object.assign(new Error('Choose an active customer'), {
           status: 400,
           code: 'VALIDATION_ERROR',
         });
+      }
       const [validItems] = await req.orgDb.query(
         'SELECT id FROM item_master WHERE id IN (?) AND is_active=1',
         { replacements: [items.map((item) => item.item_id)], transaction: tx },
@@ -123,11 +126,12 @@ router.post(
       if (
         new Set(validItems.map((item) => item.id)).size !==
         new Set(items.map((item) => item.item_id)).size
-      )
+      ) {
         throw Object.assign(new Error('Choose active Item Master records'), {
           status: 400,
           code: 'VALIDATION_ERROR',
         });
+      }
       const quotationId = uuid();
       const quotationNumber = `QT-${Date.now()}`;
       let totalAmount = 0;
@@ -210,8 +214,9 @@ router.get(
       { replacements: [req.params.id] },
     );
 
-    if (!quotation.length)
+    if (!quotation.length) {
       return fail(res, 404, 'NOT_FOUND', 'Quotation not found');
+    }
 
     const [items] = await req.orgDb.query(
       `
@@ -297,8 +302,9 @@ router.post(
   asyncHandler(async (req, res) => {
     const { customer_id, items, notes } = req.body;
 
-    if (!customer_id)
+    if (!customer_id) {
       return fail(res, 400, 'VALIDATION_ERROR', 'customer_id is required');
+    }
     if (!items || !Array.isArray(items) || items.length === 0) {
       return fail(
         res,
@@ -307,19 +313,20 @@ router.post(
         'At least one item is required',
       );
     }
-    if (new Set(items.map((item) => item.item_id)).size !== items.length)
+    if (new Set(items.map((item) => item.item_id)).size !== items.length) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'Each sales-order item may appear only once',
       );
+    }
 
     for (const item of items) {
-      const quantity = Number(item.quantity),
-        rate = Number(item.rate),
-        discount = Number(item.discount_percent || 0),
-        gst = Number(item.gst_rate ?? 18);
+      const quantity = Number(item.quantity);
+      const rate = Number(item.rate);
+      const discount = Number(item.discount_percent || 0);
+      const gst = Number(item.gst_rate ?? 18);
       if (
         !item.item_id ||
         !Number.isFinite(quantity) ||
@@ -348,11 +355,12 @@ router.post(
         'SELECT id FROM customers WHERE id=? AND is_active=1',
         { replacements: [customer_id], transaction: tx },
       );
-      if (!customer)
+      if (!customer) {
         throw Object.assign(new Error('Choose an active customer'), {
           status: 400,
           code: 'VALIDATION_ERROR',
         });
+      }
       const [validItems] = await req.orgDb.query(
         'SELECT id FROM item_master WHERE id IN (?) AND is_active=1',
         { replacements: [items.map((item) => item.item_id)], transaction: tx },
@@ -360,11 +368,12 @@ router.post(
       if (
         new Set(validItems.map((item) => item.id)).size !==
         new Set(items.map((item) => item.item_id)).size
-      )
+      ) {
         throw Object.assign(new Error('Choose active Item Master records'), {
           status: 400,
           code: 'VALIDATION_ERROR',
         });
+      }
       const soId = uuid();
       const soNumber = `SO-${Date.now()}`;
       let totalAmount = 0;
@@ -444,8 +453,9 @@ router.get(
       { replacements: [req.params.id] },
     );
 
-    if (!order.length)
+    if (!order.length) {
       return fail(res, 404, 'NOT_FOUND', 'Sales order not found');
+    }
 
     const [items] = await req.orgDb.query(
       `
@@ -469,8 +479,9 @@ router.post(
       'SELECT status FROM sales_orders WHERE id = ?',
       { replacements: [req.params.id] },
     );
-    if (!order.length)
+    if (!order.length) {
       return fail(res, 404, 'NOT_FOUND', 'Sales order not found');
+    }
 
     if (!['draft', 'confirmed'].includes(order[0].status)) {
       return fail(
@@ -544,13 +555,14 @@ router.post(
     const { customer_id, so_id, items, warehouse_id, delivery_date, notes } =
       req.body;
 
-    if (!customer_id || !so_id || !warehouse_id)
+    if (!customer_id || !so_id || !warehouse_id) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'customer_id, so_id and warehouse_id are required',
       );
+    }
     if (!items || !Array.isArray(items) || items.length === 0) {
       return fail(
         res,
@@ -682,13 +694,14 @@ router.post(
   asyncHandler(async (req, res) => {
     const { customer_id, so_id, items, warehouse_id, reason, notes } = req.body;
 
-    if (!customer_id || !so_id)
+    if (!customer_id || !so_id) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'customer_id and so_id are required',
       );
+    }
     if (!items || !Array.isArray(items) || items.length === 0) {
       return fail(
         res,
@@ -719,21 +732,23 @@ router.post(
         'SELECT id FROM warehouses WHERE id=? AND is_active=1',
         { replacements: [warehouse_id || null], transaction: tx },
       );
-      if (!customer || !warehouse)
+      if (!customer || !warehouse) {
         throw Object.assign(
           new Error('Choose an active customer and warehouse'),
           { status: 400, code: 'VALIDATION_ERROR' },
         );
+      }
       if (so_id) {
         const [[order]] = await req.orgDb.query(
           'SELECT id,customer_id FROM sales_orders WHERE id=? FOR UPDATE',
           { replacements: [so_id], transaction: tx },
         );
-        if (!order || order.customer_id !== customer_id)
+        if (!order || order.customer_id !== customer_id) {
           throw Object.assign(
             new Error('Sales order does not belong to this customer'),
             { status: 409, code: 'INVALID_RETURN' },
           );
+        }
         const requested =
           require('../utils/workflowValidation').aggregateItemQuantities(
             items,
@@ -748,11 +763,12 @@ router.post(
             "SELECT COALESCE(SUM(sri.quantity),0) quantity FROM sales_return_items sri JOIN sales_returns sr ON sr.id=sri.return_id WHERE sr.so_id=? AND sri.item_id=? AND sr.status<>'cancelled' FOR UPDATE",
             { replacements: [so_id, itemId], transaction: tx },
           );
-          if (Number(returned.quantity) + returnQty > Number(sent.quantity))
+          if (Number(returned.quantity) + returnQty > Number(sent.quantity)) {
             throw Object.assign(
               new Error('Return quantity exceeds dispatched quantity'),
               { status: 409, code: 'INVALID_RETURN' },
             );
+          }
         }
       }
       const returnId = uuid();
@@ -823,8 +839,9 @@ router.get(
       { replacements: [req.params.id] },
     );
 
-    if (!ret.length)
+    if (!ret.length) {
       return fail(res, 404, 'NOT_FOUND', 'Sales return not found');
+    }
 
     const [items] = await req.orgDb.query(
       `
@@ -882,25 +899,27 @@ router.post(
         { replacements: [req.params.id], transaction: tx },
       );
 
-      if (!items.length)
+      if (!items.length) {
         throw Object.assign(new Error('Return requires items'), {
           status: 400,
           code: 'VALIDATION_ERROR',
         });
+      }
       let total = 0;
       for (const item of items) {
-        const qty = Number(item.quantity),
-          rate = Number(item.rate || 0);
+        const qty = Number(item.quantity);
+        const rate = Number(item.rate || 0);
         if (
           !Number.isFinite(qty) ||
           qty <= 0 ||
           !Number.isFinite(rate) ||
           rate < 0
-        )
+        ) {
           throw Object.assign(new Error('Invalid return quantity or rate'), {
             status: 400,
             code: 'VALIDATION_ERROR',
           });
+        }
         total += qty * rate;
         await require('../services/zeroGapClosure.service').applyStockEffect(
           req.orgDb,
@@ -952,12 +971,12 @@ router.get(
   '/invoices',
   permission('sales', 'can_view'),
   asyncHandler(async (req, res) => {
-    const page = Math.max(1, Number(req.query.page || 1)),
-      limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
-    const search = String(req.query.search || '').trim(),
-      where = search
-        ? ' WHERE i.invoice_number LIKE ? OR c.company_name LIKE ?'
-        : '';
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const search = String(req.query.search || '').trim();
+    const where = search
+      ? ' WHERE i.invoice_number LIKE ? OR c.company_name LIKE ?'
+      : '';
     const values = search ? [`%${search}%`, `%${search}%`] : [];
     const [[count]] = await req.orgDb.query(
       `SELECT COUNT(*) total FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id${where}`,
@@ -1013,7 +1032,9 @@ router.get(
       'SELECT i.*,c.company_name FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id WHERE i.id=?',
       { replacements: [req.params.id] },
     );
-    if (!invoice) return fail(res, 404, 'NOT_FOUND', 'Invoice not found');
+    if (!invoice) {
+      return fail(res, 404, 'NOT_FOUND', 'Invoice not found');
+    }
     const [items] = await req.orgDb.query(
       'SELECT * FROM invoice_item_lines WHERE invoice_id=? ORDER BY id',
       { replacements: [req.params.id] },
@@ -1030,13 +1051,14 @@ router.post(
   permission('sales', 'can_edit'),
   asyncHandler(async (req, res) => {
     const key = req.get('Idempotency-Key');
-    if (!key)
+    if (!key) {
       return fail(
         res,
         400,
         'IDEMPOTENCY_KEY_REQUIRED',
         'Idempotency-Key is required',
       );
+    }
     return created(
       res,
       await require('../services/erp.service').recordInvoicePayment(

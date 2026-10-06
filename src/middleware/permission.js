@@ -2,7 +2,10 @@ const { fail } = require('../utils/response');
 const { v4: uuid } = require('uuid');
 
 function auditPermission(req, allowed, moduleKey, action) {
-  if (!req.orgDb) return;
+  if (!req.orgDb) {
+    return;
+  }
+
   req.orgDb
     .query(
       'INSERT INTO activity_log(id,user_id,module,action,reference_type,reference_id,changes,ip_address) VALUES(?,?,?,?,?,?,?,?)',
@@ -35,6 +38,7 @@ const permission =
       auditPermission(req, true, moduleKey, action);
       return next();
     }
+
     try {
       const allowedColumn = [
         'can_view',
@@ -50,10 +54,12 @@ const permission =
         `SELECT ${allowedColumn} AS allowed FROM role_permissions WHERE role=? AND module_key=? LIMIT 1`,
         { replacements: [req.user?.role, moduleKey] },
       );
+
       if (rows[0]?.allowed) {
         auditPermission(req, true, moduleKey, action);
         return next();
       }
+
       auditPermission(req, false, moduleKey, action);
       return fail(
         res,

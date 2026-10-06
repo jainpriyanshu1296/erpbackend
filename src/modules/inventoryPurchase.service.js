@@ -1,4 +1,5 @@
 const { v4: uuid } = require('uuid');
+const { applyStockEffect } = require('../services/zeroGapClosure.service');
 
 const transitions = {
   purchase_requisitions: {
@@ -96,16 +97,21 @@ async function list(db, table, query) {
 }
 
 async function transition(db, table, id, next, userId) {
-  if (table === 'grn' && next === 'posted') return postGrn(db, id, userId);
+  if (table === 'grn' && next === 'posted') {
+    return postGrn(db, id, userId);
+  }
   return db.transaction(async (transaction) => {
     const [rows] = await db.query(
       `SELECT id,status FROM ${table} WHERE id=? FOR UPDATE`,
       { replacements: [id], transaction },
     );
-    if (!rows[0]) return { error: 'NOT_FOUND' };
+    if (!rows[0]) {
+      return { error: 'NOT_FOUND' };
+    }
     const current = rows[0].status;
-    if (!(transitions[table]?.[current] || []).includes(next))
+    if (!(transitions[table]?.[current] || []).includes(next)) {
       return { error: 'INVALID_TRANSITION', current };
+    }
     await db.query(
       `UPDATE ${table} SET status=?${table === 'grn' && next === 'posted' ? ', posted_at=NOW()' : ''} WHERE id=? AND status=?`,
       { replacements: [next, id, current], transaction },
@@ -131,10 +137,15 @@ async function postGrn(db, grnId, userId, input = {}) {
     const [[grn]] = await query('SELECT * FROM grn WHERE id=? FOR UPDATE', [
       grnId,
     ]);
-    if (!grn) return { error: 'NOT_FOUND' };
-    if (grn.status === 'posted')
+    if (!grn) {
+      return { error: 'NOT_FOUND' };
+    }
+    if (grn.status === 'posted') {
       return { id: grnId, status: 'posted', already_posted: true };
-    if (grn.status !== 'draft') return { error: 'INVALID_TRANSITION' };
+    }
+    if (grn.status !== 'draft') {
+      return { error: 'INVALID_TRANSITION' };
+    }
     let order;
     if (grn.po_id) {
       [[order]] = await query(
@@ -145,8 +156,9 @@ async function postGrn(db, grnId, userId, input = {}) {
         !order ||
         !['approved', 'confirmed', 'part_received'].includes(order.status) ||
         order.vendor_id !== grn.vendor_id
-      )
+      ) {
         return { error: 'INVALID_PURCHASE_ORDER' };
+      }
     }
     const warehouse =
       input.warehouse_id || grn.warehouse_id || order?.warehouse_id;
@@ -154,12 +166,16 @@ async function postGrn(db, grnId, userId, input = {}) {
       'SELECT id FROM warehouses WHERE id=? AND is_active=1',
       [warehouse || null],
     );
-    if (!wh) return { error: 'INVALID_WAREHOUSE' };
+    if (!wh) {
+      return { error: 'INVALID_WAREHOUSE' };
+    }
     const [items] = await query(
       'SELECT * FROM grn_items WHERE grn_id=? ORDER BY item_id,id',
       [grnId],
     );
-    if (!items.length) return { error: 'EMPTY_GRN' };
+    if (!items.length) {
+      return { error: 'EMPTY_GRN' };
+    }
     const pending = new Map();
     for (const item of items) {
       if (
@@ -168,20 +184,22 @@ async function postGrn(db, grnId, userId, input = {}) {
         Number(item.quantity) <= 0 ||
         !Number.isFinite(Number(item.rate || 0)) ||
         Number(item.rate || 0) < 0
-      )
+      ) {
         throw Object.assign(
           new Error('Invalid receipt item quantity or rate'),
           { status: 400 },
         );
+      }
       const [[master]] = await query(
         'SELECT id FROM item_master WHERE id=? AND is_active=1',
         [item.item_id],
       );
-      if (!master)
+      if (!master) {
         throw Object.assign(
           new Error('Receipt requires an active Item Master record'),
           { status: 400 },
         );
+      }
       if (order) {
         const [matches] = await query(
           'SELECT id,quantity FROM purchase_order_items WHERE order_id=? AND item_id=?' +
@@ -192,13 +210,14 @@ async function postGrn(db, grnId, userId, input = {}) {
             ...(item.po_item_id ? [item.po_item_id] : []),
           ],
         );
-        if (matches.length !== 1)
+        if (matches.length !== 1) {
           throw Object.assign(
             new Error(
               'Receipt item must identify a matching purchase order line',
             ),
             { status: 400 },
           );
+        }
         const line = matches[0];
         const [[received]] = await query(
           "SELECT COALESCE(SUM(gi.quantity),0) quantity FROM grn_items gi JOIN grn g ON g.id=gi.grn_id WHERE gi.po_item_id=? AND g.status='posted'",
@@ -206,10 +225,11 @@ async function postGrn(db, grnId, userId, input = {}) {
         );
         const quantity = (pending.get(line.id) || 0) + Number(item.quantity);
         pending.set(line.id, quantity);
-        if (Number(received.quantity) + quantity > Number(line.quantity))
+        if (Number(received.quantity) + quantity > Number(line.quantity)) {
           throw Object.assign(new Error('Receipt exceeds ordered quantity'), {
             status: 409,
           });
+        }
         await query('UPDATE grn_items SET po_item_id=? WHERE id=?', [
           line.id,
           item.id,
@@ -220,11 +240,12 @@ async function postGrn(db, grnId, userId, input = {}) {
       "UPDATE grn SET status='posted',warehouse_id=?,posted_at=NOW() WHERE id=?",
       [warehouse, grnId],
     );
-    if (order)
+    if (order) {
       await query(
         "UPDATE purchase_orders SET status='part_received' WHERE id=?",
         [order.id],
       );
+    }
     await audit(
       db,
       userId,
@@ -268,10 +289,13 @@ async function transitionEntity(db, table, id, next, userId, transitionsMap) {
       `SELECT * FROM ${table} WHERE id=? FOR UPDATE`,
       { replacements: [id], transaction },
     );
-    if (!rows[0]) return { error: 'NOT_FOUND' };
+    if (!rows[0]) {
+      return { error: 'NOT_FOUND' };
+    }
     const current = rows[0].status;
-    if (!(transitionsMap[current] || []).includes(next))
+    if (!(transitionsMap[current] || []).includes(next)) {
       return { error: 'INVALID_TRANSITION', current };
+    }
     const fields =
       next === 'requested'
         ? ',requested_at=NOW()'
@@ -309,29 +333,40 @@ async function receiveTransfer(db, transferId, userId) {
       'SELECT * FROM warehouse_transfers WHERE id=? FOR UPDATE',
       { replacements: [transferId], transaction },
     );
-    if (!transfers[0]) return { error: 'NOT_FOUND' };
+    if (!transfers[0]) {
+      return { error: 'NOT_FOUND' };
+    }
     const transfer = transfers[0];
     const [receipts] = await db.query(
       'SELECT id FROM warehouse_transfer_receipts WHERE transfer_id=? FOR UPDATE',
       { replacements: [transferId], transaction },
     );
-    if (receipts.length || transfer.status === 'received')
+    if (receipts.length || transfer.status === 'received') {
       return { id: transferId, status: 'received', alreadyReceived: true };
-    if (!['approved', 'in_transit'].includes(transfer.status))
+    }
+    if (!['approved', 'in_transit'].includes(transfer.status)) {
       return { error: 'INVALID_TRANSITION', current: transfer.status };
-    if (transfer.from_warehouse_id === transfer.to_warehouse_id)
+    }
+    if (transfer.from_warehouse_id === transfer.to_warehouse_id) {
       return { error: 'INVALID_WAREHOUSES' };
+    }
     const [items] = await db.query(
       'SELECT * FROM warehouse_transfer_items WHERE transfer_id=? ORDER BY item_id',
       { replacements: [transferId], transaction },
     );
-    if (!items.length) return { error: 'EMPTY_TRANSFER' };
+    if (!items.length) {
+      return { error: 'EMPTY_TRANSFER' };
+    }
     for (const item of items) {
-      if (!Number.isFinite(Number(item.quantity)) || Number(item.quantity) <= 0)
+      if (
+        !Number.isFinite(Number(item.quantity)) ||
+        Number(item.quantity) <= 0
+      ) {
         throw Object.assign(new Error('Transfer quantity must be positive'), {
           status: 400,
           code: 'INVALID_QUANTITY',
         });
+      }
       const [sourceRows] = await db.query(
         'SELECT current_qty,avg_rate FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE',
         {
@@ -340,67 +375,37 @@ async function receiveTransfer(db, transferId, userId) {
         },
       );
       const source = sourceRows[0];
-      if (!source || Number(source.current_qty) < Number(item.quantity))
+      if (!source || Number(source.current_qty) < Number(item.quantity)) {
         throw Object.assign(
           new Error(`Insufficient stock for item ${item.item_id}`),
           { status: 409, code: 'INSUFFICIENT_STOCK' },
         );
-      const rate = Number(source.avg_rate || 0);
-      await db.query(
-        'INSERT INTO stock_ledger(id,item_id,warehouse_id,transaction_type,reference_type,reference_id,qty_out,rate,amount,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)',
-        {
-          replacements: [
-            uuid(),
-            item.item_id,
-            transfer.from_warehouse_id,
-            'transfer',
-            'warehouse_transfer',
-            transferId,
-            item.quantity,
-            rate,
-            Number(item.quantity) * rate,
-            userId || null,
-          ],
-          transaction,
-        },
-      );
-      await db.query(
-        'INSERT INTO stock_ledger(id,item_id,warehouse_id,transaction_type,reference_type,reference_id,qty_in,rate,amount,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)',
-        {
-          replacements: [
-            uuid(),
-            item.item_id,
-            transfer.to_warehouse_id,
-            'transfer',
-            'warehouse_transfer',
-            transferId,
-            item.quantity,
-            rate,
-            Number(item.quantity) * rate,
-            userId || null,
-          ],
-          transaction,
-        },
-      );
-      for (const [warehouse, direction] of [
-        [transfer.from_warehouse_id, -1],
-        [transfer.to_warehouse_id, 1],
-      ]) {
-        await db.query(
-          `INSERT INTO stock_summary(item_id,warehouse_id,current_qty,avg_rate,total_value) VALUES(?,?,?,?,?)
-          ON DUPLICATE KEY UPDATE avg_rate=IF(current_qty+VALUES(current_qty)>0,(total_value+VALUES(total_value))/(current_qty+VALUES(current_qty)),avg_rate), current_qty=current_qty+VALUES(current_qty), total_value=total_value+VALUES(total_value)`,
-          {
-            replacements: [
-              item.item_id,
-              warehouse,
-              direction * Number(item.quantity),
-              rate,
-              direction * Number(item.quantity) * rate,
-            ],
-            transaction,
-          },
-        );
       }
+      const rate = Number(source.avg_rate || 0);
+      await applyStockEffect(db, {
+        operationKey: `transfer:${transferId}:${item.id}:out`,
+        referenceType: 'warehouse_transfer',
+        referenceId: transferId,
+        itemId: item.item_id,
+        warehouseId: transfer.from_warehouse_id,
+        quantity: item.quantity,
+        rate,
+        direction: 'out',
+        userId,
+        transaction,
+      });
+      await applyStockEffect(db, {
+        operationKey: `transfer:${transferId}:${item.id}:in`,
+        referenceType: 'warehouse_transfer',
+        referenceId: transferId,
+        itemId: item.item_id,
+        warehouseId: transfer.to_warehouse_id,
+        quantity: item.quantity,
+        rate,
+        direction: 'in',
+        userId,
+        transaction,
+      });
     }
     await db.query(
       'INSERT INTO warehouse_transfer_receipts(id,transfer_id,received_by) VALUES(?,?,?)',
@@ -434,8 +439,9 @@ async function reserveStock(db, data, userId) {
     !data.warehouse_id ||
     !Number.isFinite(quantity) ||
     quantity <= 0
-  )
+  ) {
     return { error: 'VALIDATION_ERROR' };
+  }
   return db.transaction(async (transaction) => {
     const [stock] = await db.query(
       'SELECT current_qty FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE',
@@ -450,8 +456,9 @@ async function reserveStock(db, data, userId) {
       (total, row) => total + Number(row.quantity || 0),
       0,
     );
-    if (reserved + quantity > onHand)
+    if (reserved + quantity > onHand) {
       return { error: 'INSUFFICIENT_AVAILABLE_STOCK', onHand, reserved };
+    }
     const id = uuid();
     await db.query(
       'INSERT INTO stock_reservations(id,item_id,warehouse_id,reference_type,reference_id,quantity,status,created_by) VALUES(?,?,?,?,?,?,?,?)',
@@ -484,16 +491,20 @@ async function reserveStock(db, data, userId) {
 }
 
 async function changeReservation(db, id, action, userId) {
-  if (!['released', 'consumed'].includes(action))
+  if (!['released', 'consumed'].includes(action)) {
     return { error: 'VALIDATION_ERROR' };
+  }
   return db.transaction(async (transaction) => {
     const [rows] = await db.query(
       'SELECT * FROM stock_reservations WHERE id=? FOR UPDATE',
       { replacements: [id], transaction },
     );
-    if (!rows[0]) return { error: 'NOT_FOUND' };
-    if (rows[0].status !== 'reserved')
+    if (!rows[0]) {
+      return { error: 'NOT_FOUND' };
+    }
+    if (rows[0].status !== 'reserved') {
       return { id, status: rows[0].status, alreadyChanged: true };
+    }
     await db.query(
       'UPDATE stock_reservations SET status=? WHERE id=? AND status=?',
       { replacements: [action, id, 'reserved'], transaction },
@@ -530,36 +541,41 @@ async function rfqFromRequisition(db, requisitionId, userId) {
       'SELECT * FROM purchase_requisitions WHERE id=? FOR UPDATE',
       [requisitionId],
     );
-    if (!requisition || requisition.status !== 'approved')
+    if (!requisition || requisition.status !== 'approved') {
       throw Object.assign(
         new Error('Approve the requisition before sourcing'),
         { status: 409 },
       );
+    }
     const [[existing]] = await query(
       "SELECT target_id FROM related_documents WHERE source_type='purchase_requisition' AND source_id=? AND target_type='rfq' AND relation='sourcing'",
       [requisitionId],
     );
-    if (existing) return { id: existing.target_id, already_created: true };
+    if (existing) {
+      return { id: existing.target_id, already_created: true };
+    }
     const [items] = await query(
       'SELECT item_id,SUM(quantity) quantity FROM purchase_requisition_items WHERE requisition_id=? GROUP BY item_id',
       [requisitionId],
     );
-    if (!items.length)
+    if (!items.length) {
       throw Object.assign(new Error('Requisition requires items'), {
         status: 400,
       });
-    const id = uuid(),
-      number = `RFQ-${id}`;
+    }
+    const id = uuid();
+    const number = `RFQ-${id}`;
     await query('INSERT INTO rfqs(id,rfq_number,requested_by) VALUES(?,?,?)', [
       id,
       number,
       userId,
     ]);
-    for (const item of items)
+    for (const item of items) {
       await query(
         'INSERT INTO rfq_items(id,rfq_id,item_id,quantity) VALUES(?,?,?,?)',
         [uuid(), id, item.item_id, item.quantity],
       );
+    }
     await query(
       "INSERT INTO related_documents(id,source_type,source_id,target_type,target_id,relation,created_by) VALUES(?,'purchase_requisition',?,'rfq',?,'sourcing',?)",
       [uuid(), requisitionId, id, userId],
@@ -574,16 +590,19 @@ async function orderFromRfq(db, rfqId, vendorId, warehouseId, userId) {
     const [[rfq]] = await query('SELECT * FROM rfqs WHERE id=? FOR UPDATE', [
       rfqId,
     ]);
-    if (!rfq || rfq.status !== 'approved')
+    if (!rfq || rfq.status !== 'approved') {
       throw Object.assign(
         new Error('Approve the selected RFQ before creating a PO'),
         { status: 409 },
       );
+    }
     const [[existing]] = await query(
       "SELECT po.id,po.po_number FROM related_documents rd JOIN purchase_orders po ON po.id=rd.target_id WHERE rd.source_type='rfq' AND rd.source_id=? AND rd.target_type='purchase_order' AND rd.relation='awarded' AND po.vendor_id=?",
       [rfqId, vendorId],
     );
-    if (existing) return { ...existing, already_created: true };
+    if (existing) {
+      return { ...existing, already_created: true };
+    }
     const [[vendor]] = await query(
       'SELECT id FROM vendors WHERE id=? AND is_active=1',
       [vendorId],
@@ -592,25 +611,27 @@ async function orderFromRfq(db, rfqId, vendorId, warehouseId, userId) {
       'SELECT id FROM warehouses WHERE id=? AND is_active=1',
       [warehouseId],
     );
-    if (!vendor || !warehouse)
+    if (!vendor || !warehouse) {
       throw Object.assign(new Error('Choose an active vendor and warehouse'), {
         status: 400,
       });
+    }
     const [items] = await query(
       'SELECT q.* FROM rfq_quotation_lines q JOIN rfq_suppliers s ON s.id=q.rfq_supplier_id WHERE s.rfq_id=? AND s.supplier_id=? AND q.is_selected=1 ORDER BY q.item_id',
       [rfqId, vendorId],
     );
-    if (!items.length)
+    if (!items.length) {
       throw Object.assign(
         new Error('Select quotation lines for this vendor first'),
         { status: 400 },
       );
+    }
     const [[link]] = await query(
       "SELECT source_id FROM related_documents WHERE source_type='purchase_requisition' AND target_type='rfq' AND target_id=? AND relation='sourcing'",
       [rfqId],
     );
-    const id = uuid(),
-      number = `PO-${id}`;
+    const id = uuid();
+    const number = `PO-${id}`;
     const total = items.reduce(
       (sum, item) =>
         sum +
@@ -619,10 +640,11 @@ async function orderFromRfq(db, rfqId, vendorId, warehouseId, userId) {
           (1 + Number(item.tax_rate || 0) / 100),
       0,
     );
-    if (!Number.isFinite(total) || total < 0)
+    if (!Number.isFinite(total) || total < 0) {
       throw Object.assign(new Error('Invalid supplier pricing'), {
         status: 400,
       });
+    }
     await query(
       "INSERT INTO purchase_orders(id,po_number,vendor_id,warehouse_id,requisition_id,status,total_amount,created_by) VALUES(?,?,?,?,?,'draft',?,?)",
       [
@@ -635,7 +657,7 @@ async function orderFromRfq(db, rfqId, vendorId, warehouseId, userId) {
         userId,
       ],
     );
-    for (const item of items)
+    for (const item of items) {
       await query(
         'INSERT INTO purchase_order_items(id,order_id,item_id,quantity,rate,tax_percent) VALUES(?,?,?,?,?,?)',
         [
@@ -647,6 +669,7 @@ async function orderFromRfq(db, rfqId, vendorId, warehouseId, userId) {
           item.tax_rate || 0,
         ],
       );
+    }
     await query(
       "INSERT INTO related_documents(id,source_type,source_id,target_type,target_id,relation,created_by) VALUES(?,'rfq',?,'purchase_order',?,'awarded',?)",
       [uuid(), rfqId, id, userId],

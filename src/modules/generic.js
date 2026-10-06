@@ -7,10 +7,12 @@ const moduleGuard = require('../middleware/moduleGuard');
 const permission = require('../middleware/permission');
 const allowed = /^[a-z][a-z0-9_]*$/;
 function crud(table, module = 'dashboard', options = {}) {
-  if (!allowed.test(table)) throw new Error('Unsafe table name');
+  if (!allowed.test(table)) {
+    throw new Error('Unsafe table name');
+  }
   const r = express.Router();
   r.use(auth, orgContext, moduleGuard(module));
-  if (['work_orders', 'job_cards', 'bom'].includes(table))
+  if (['work_orders', 'job_cards', 'bom'].includes(table)) {
     r.use((req, res, next) =>
       ['GET', 'HEAD'].includes(req.method)
         ? next()
@@ -21,7 +23,8 @@ function crud(table, module = 'dashboard', options = {}) {
             'Use the validated production workflow',
           ),
     );
-  if (table === 'invoices')
+  }
+  if (table === 'invoices') {
     r.use((req, res, next) =>
       ['GET', 'HEAD'].includes(req.method)
         ? next()
@@ -32,7 +35,8 @@ function crud(table, module = 'dashboard', options = {}) {
             'Use the sales invoice workflow to change invoices',
           ),
     );
-  if (table === 'qc_inspections')
+  }
+  if (table === 'qc_inspections') {
     r.use((req, res, next) =>
       ['GET', 'HEAD'].includes(req.method)
         ? next()
@@ -43,6 +47,19 @@ function crud(table, module = 'dashboard', options = {}) {
             'Use the Incoming, In-process, Final QC and result-processing workflows',
           ),
     );
+  }
+  if (table === 'stock_ledger') {
+    r.use((req, res, next) =>
+      ['GET', 'HEAD'].includes(req.method)
+        ? next()
+        : fail(
+            res,
+            405,
+            'APPEND_ONLY_LEDGER',
+            'Stock ledger entries are written only by validated inventory workflows',
+          ),
+    );
+  }
   r.get(
     '/',
     permission(module, 'can_view'),
@@ -71,7 +88,7 @@ function crud(table, module = 'dashboard', options = {}) {
       });
     }),
   );
-  if (options.create !== false)
+  if (options.create !== false) {
     r.post(
       '/',
       permission(module, 'can_create'),
@@ -80,22 +97,24 @@ function crud(table, module = 'dashboard', options = {}) {
           !req.body ||
           typeof req.body !== 'object' ||
           Array.isArray(req.body)
-        )
+        ) {
           return fail(
             res,
             400,
             'VALIDATION_ERROR',
             'A JSON object is required',
           );
+        }
         const payload = { ...req.body, id: req.body.id || uuid() };
         const keys = Object.keys(payload).filter((k) => allowed.test(k));
-        if (!keys.length)
+        if (!keys.length) {
           return fail(
             res,
             400,
             'VALIDATION_ERROR',
             'At least one field is required',
           );
+        }
         const vals = keys.map((k) => payload[k]);
         await req.orgDb.query(
           `INSERT INTO ${table} (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`,
@@ -104,6 +123,7 @@ function crud(table, module = 'dashboard', options = {}) {
         return created(res, payload);
       }),
     );
+  }
   r.get(
     '/:id',
     permission(module, 'can_view'),
@@ -124,8 +144,9 @@ function crud(table, module = 'dashboard', options = {}) {
       const keys = Object.keys(req.body).filter(
         (k) => allowed.test(k) && k !== 'id',
       );
-      if (!keys.length)
+      if (!keys.length) {
         return fail(res, 400, 'VALIDATION_ERROR', 'No fields to update');
+      }
       await req.orgDb.query(
         `UPDATE ${table} SET ${keys.map((k) => `${k} = ?`).join(',')} WHERE id = ?`,
         { replacements: [...keys.map((k) => req.body[k]), req.params.id] },
@@ -147,8 +168,8 @@ function crud(table, module = 'dashboard', options = {}) {
       return ok(res, null, 'Deleted successfully');
     }),
   );
-  if (options.actions)
-    for (const [path, method] of Object.entries(options.actions))
+  if (options.actions) {
+    for (const [path, method] of Object.entries(options.actions)) {
       r[method || 'put'](
         `/:id/${path}`,
         permission(module, path === 'approve' ? 'can_approve' : 'can_edit'),
@@ -163,6 +184,8 @@ function crud(table, module = 'dashboard', options = {}) {
           );
         }),
       );
+    }
+  }
   return r;
 }
 module.exports = crud;

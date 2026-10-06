@@ -89,14 +89,18 @@ async function write(db, table, data, userId, operationKey) {
     data.quantity = 0;
     assert(data.batch_no, 'Batch number is required');
   }
-  if (table === 'serial') assert(data.serial_no, 'Serial number is required');
-  if (table === 'count')
+  if (table === 'serial') {
+    assert(data.serial_no, 'Serial number is required');
+  }
+  if (table === 'count') {
     assert(
       data.count_number && data.warehouse_id,
       'Count number and warehouse are required',
     );
-  if (['batch', 'serial'].includes(table))
+  }
+  if (['batch', 'serial'].includes(table)) {
     assert(data.item_id, 'item_id is required');
+  }
   if (
     [
       'batch',
@@ -114,7 +118,7 @@ async function write(db, table, data, userId, operationKey) {
       data.allocated_amount ??
       data.counted_qty ??
       data.minutes;
-    if (quantity !== undefined)
+    if (quantity !== undefined) {
       assert(
         Number.isFinite(Number(quantity)) &&
           (['countLine', 'batch'].includes(table)
@@ -122,6 +126,7 @@ async function write(db, table, data, userId, operationKey) {
             : Number(quantity) > 0),
         'quantity must be a finite valid number',
       );
+    }
   }
   const tx = await db.transaction();
   try {
@@ -194,12 +199,13 @@ async function write(db, table, data, userId, operationKey) {
         order && ['released', 'in_progress'].includes(order.status),
         'A released production order is required',
       );
-      if (table === 'output')
+      if (table === 'output') {
         assert(
           order.item_id === data.item_id &&
             Number(data.quantity) <= Number(order.planned_qty),
           'Output must match the production item and planned quantity',
         );
+      }
     }
     if (table === 'countLine') {
       const [[count]] = await db.query(
@@ -246,7 +252,7 @@ async function write(db, table, data, userId, operationKey) {
     );
     result = { id, ...data };
     await audit(db, userId, 'created', table, id, result, tx);
-    if (operationKey)
+    if (operationKey) {
       await db.query(
         'INSERT INTO operation_keys(id,operation_key,result_json) VALUES(?,?,?)',
         {
@@ -254,6 +260,7 @@ async function write(db, table, data, userId, operationKey) {
           transaction: tx,
         },
       );
+    }
     await tx.commit();
     return result;
   } catch (e) {
@@ -300,13 +307,14 @@ async function transition(db, table, id, status, userId) {
         (allowed[rows[0].status] || []).includes(status),
         'Invalid physical count transition',
       );
-    } else
+    } else {
       assert(
         !['posted', 'issued', 'cancelled', 'rejected', 'approved'].includes(
           rows[0].status,
         ),
         'Terminal records cannot be changed',
       );
+    }
     if (table === 'approval') {
       const [steps] = await db.query(
         'SELECT * FROM approval_steps WHERE approval_id=? ORDER BY step_no FOR UPDATE',
@@ -453,7 +461,9 @@ async function applyStockEffect(
       { replacements: [operationKey], transaction: tx },
     );
     if (existing.length) {
-      if (ownsTransaction) await tx.commit();
+      if (ownsTransaction) {
+        await tx.commit();
+      }
       return { already_applied: true, operation_key: operationKey };
     }
     const [stockRows] = await db.query(
@@ -461,7 +471,9 @@ async function applyStockEffect(
       { replacements: [itemId, warehouseId], transaction: tx },
     );
     const current = Number(stockRows[0]?.current_qty || 0);
-    if (direction === 'out') assert(current >= qty, 'Insufficient stock');
+    if (direction === 'out') {
+      assert(current >= qty, 'Insufficient stock');
+    }
     if (batchId) {
       const [batches] = await db.query(
         'SELECT item_id,quantity FROM stock_batches WHERE id=? FOR UPDATE',
@@ -471,8 +483,9 @@ async function applyStockEffect(
         batches.length && batches[0].item_id === itemId,
         'Batch does not belong to item',
       );
-      if (direction === 'out')
+      if (direction === 'out') {
         assert(Number(batches[0].quantity) >= qty, 'Insufficient batch stock');
+      }
       await db.query(
         'UPDATE stock_batches SET quantity=quantity+? WHERE id=?',
         {
@@ -491,8 +504,9 @@ async function applyStockEffect(
         serials.length && serials[0].item_id === itemId,
         'Serial does not belong to item',
       );
-      if (direction === 'out')
+      if (direction === 'out') {
         assert(serials[0].status === 'available', 'Serial is not available');
+      }
       await db.query('UPDATE stock_serials SET status=? WHERE id=?', {
         replacements: [direction === 'in' ? 'available' : 'issued', serialId],
         transaction: tx,
@@ -555,7 +569,9 @@ async function applyStockEffect(
         transaction: tx,
       },
     );
-    if (ownsTransaction) await tx.commit();
+    if (ownsTransaction) {
+      await tx.commit();
+    }
     return {
       operation_key: operationKey,
       quantity: qty,
@@ -563,7 +579,9 @@ async function applyStockEffect(
       already_applied: false,
     };
   } catch (error) {
-    if (ownsTransaction) await tx.rollback();
+    if (ownsTransaction) {
+      await tx.rollback();
+    }
     throw error;
   }
 }
@@ -595,8 +613,9 @@ async function allocatePayment(db, paymentId, invoiceId, amount, userId) {
         Number(paid.total || 0) -
         Number(allocated.total || 0),
     );
-    if (value > balance)
+    if (value > balance) {
       throw conflict('Payment allocation exceeds invoice balance');
+    }
     await db.query(
       'INSERT INTO payment_allocations(id,payment_id,invoice_id,allocated_amount) VALUES(?,?,?,?)',
       { replacements: [uuid(), paymentId, invoiceId, value], transaction: tx },
@@ -674,7 +693,9 @@ async function postPhysicalCount(db, countId, userId) {
         'Stock changed after counting; cancel this count and recount before posting',
       );
       const variance = Number(line.counted_qty) - Number(line.system_qty);
-      if (!variance) continue;
+      if (!variance) {
+        continue;
+      }
       await applyStockEffect(db, {
         operationKey: `physical-count:${countId}:${line.id}`,
         referenceType: 'physical_count',

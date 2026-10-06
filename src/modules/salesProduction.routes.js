@@ -52,7 +52,9 @@ sales.get(
       'SELECT * FROM customers WHERE id=? LIMIT 1',
       { replacements: [req.params.id] },
     );
-    if (!rows.length) return fail(res, 404, 'NOT_FOUND', 'Customer not found');
+    if (!rows.length) {
+      return fail(res, 404, 'NOT_FOUND', 'Customer not found');
+    }
     return ok(res, rows[0]);
   }),
 );
@@ -65,7 +67,9 @@ sales.get(
       'SELECT * FROM customers WHERE id=? LIMIT 1',
       { replacements: [id] },
     );
-    if (!customer) return fail(res, 404, 'NOT_FOUND', 'Customer not found');
+    if (!customer) {
+      return fail(res, 404, 'NOT_FOUND', 'Customer not found');
+    }
     const [[summary]] = await req.orgDb.query(
       `SELECT
     (SELECT COUNT(*) FROM quotations WHERE customer_id=?) quotations,
@@ -91,8 +95,9 @@ sales.post(
   permission('sales', 'can_create'),
   asyncHandler(async (req, res) => {
     const { company_name } = req.body;
-    if (!company_name)
+    if (!company_name) {
       return fail(res, 400, 'VALIDATION_ERROR', 'company_name is required');
+    }
     const id = req.body.id || uuid();
     await req.orgDb.query(
       'INSERT INTO customers(id,customer_code,company_name,contact_person,phone,email,gstin,state,address,payment_terms) VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -168,8 +173,8 @@ for (const [path, table, columns] of [
     asyncHandler(async (req, res) => {
       const { page, limit, offset, search, sort, direction } =
         require('../utils/listQuery')(req.query, columns);
-      const clauses = [],
-        values = [];
+      const clauses = [];
+      const values = [];
       if (search) {
         clauses.push(
           `(${columns.map((column) => `CAST(${column} AS CHAR) LIKE ?`).join(' OR ')})`,
@@ -200,7 +205,7 @@ for (const [path, table, columns] of [
       });
     }),
   );
-  if (path !== 'orders')
+  if (path !== 'orders') {
     production.get(
       `/${path}/:id`,
       permission('production', 'can_view'),
@@ -214,6 +219,7 @@ for (const [path, table, columns] of [
           : fail(res, 404, 'NOT_FOUND', 'Record not found');
       }),
     );
+  }
 }
 production.post(
   '/orders/:id/release',
@@ -239,24 +245,26 @@ production.post(
       !finished_item_id ||
       !Number.isFinite(Number(output_qty)) ||
       Number(output_qty) <= 0
-    )
+    ) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'BOM code, finished item and positive output quantity are required',
       );
+    }
     const [[item]] = await req.orgDb.query(
       'SELECT id FROM item_master WHERE id=? AND is_active=1',
       { replacements: [finished_item_id] },
     );
-    if (!item)
+    if (!item) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'An active Item Master record is required',
       );
+    }
     const id = uuid();
     await req.orgDb.query(
       'INSERT INTO bom(id,bom_code,finished_item_id,output_qty,version_no,is_active,created_by) VALUES(?,?,?,?,1,1,?)',
@@ -290,8 +298,8 @@ production.get(
         'produced_qty',
         'status',
       ]);
-    const where = search ? ' WHERE wo_number LIKE ? OR status LIKE ?' : '',
-      values = search ? [`%${search}%`, `%${search}%`] : [];
+    const where = search ? ' WHERE wo_number LIKE ? OR status LIKE ?' : '';
+    const values = search ? [`%${search}%`, `%${search}%`] : [];
     const [[count]] = await req.orgDb.query(
       `SELECT COUNT(*) total FROM work_orders${where}`,
       { replacements: values },
@@ -322,13 +330,14 @@ production.post(
       !itemId ||
       !Number.isFinite(Number(plannedQty)) ||
       Number(plannedQty) <= 0
-    )
+    ) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'bom_id, item_id and a positive planned_qty are required',
       );
+    }
     const id = uuid();
     await req.orgDb.query(
       'INSERT INTO production_orders(id,production_number,so_id,bom_id,item_id,planned_qty,status,created_by) VALUES(?,?,?,?,?,?,?,?)',
@@ -362,8 +371,9 @@ production.get(
       'SELECT * FROM production_orders WHERE id=?',
       { replacements: [req.params.id] },
     );
-    if (!order)
+    if (!order) {
       return fail(res, 404, 'NOT_FOUND', 'Production order not found');
+    }
     const [cards] = await req.orgDb.query(
       'SELECT * FROM job_cards WHERE production_order_id=? ORDER BY created_at',
       { replacements: [req.params.id] },
@@ -375,13 +385,14 @@ production.put(
   '/bom/:id/status',
   permission('production', 'can_edit'),
   asyncHandler(async (req, res) => {
-    if (!['active', 'archived'].includes(req.body.status))
+    if (!['active', 'archived'].includes(req.body.status)) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'BOM status must be active or archived',
       );
+    }
     await req.orgDb.query('UPDATE bom SET is_active=? WHERE id=?', {
       replacements: [req.body.status === 'active' ? 1 : 0, req.params.id],
     });
@@ -404,13 +415,14 @@ production.post(
       !bom ||
       !Number.isFinite(Number(planned_qty)) ||
       Number(planned_qty) <= 0
-    )
+    ) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'A matching active BOM and positive planned quantity are required',
       );
+    }
     const id = uuid();
     await req.orgDb.query(
       "INSERT INTO work_orders(id,wo_number,bom_id,finished_item_id,planned_qty,status) VALUES(?,?,?,?,?,'draft')",
@@ -431,21 +443,23 @@ production.post(
   '/bom/:id/versions',
   permission('production', 'can_create'),
   asyncHandler(async (req, res) => {
-    if (!req.body.bom_code)
+    if (!req.body.bom_code) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'New version BOM code is required',
       );
+    }
     const tx = await req.orgDb.transaction();
     try {
       const [[bom]] = await req.orgDb.query(
         'SELECT * FROM bom WHERE id=? FOR UPDATE',
         { replacements: [req.params.id], transaction: tx },
       );
-      if (!bom)
+      if (!bom) {
         throw Object.assign(new Error('BOM not found'), { status: 404 });
+      }
       const [[existing]] = await req.orgDb.query(
         'SELECT id FROM bom WHERE bom_code=?',
         { replacements: [req.body.bom_code], transaction: tx },
@@ -473,7 +487,7 @@ production.post(
         'SELECT * FROM bom_components WHERE bom_id=?',
         { replacements: [bom.id], transaction: tx },
       );
-      for (const component of components)
+      for (const component of components) {
         await req.orgDb.query(
           'INSERT INTO bom_components(id,bom_id,item_id,quantity,scrap_percent,rate) VALUES(?,?,?,?,?,?)',
           {
@@ -488,6 +502,7 @@ production.post(
             transaction: tx,
           },
         );
+      }
       await req.orgDb.query(
         "INSERT INTO related_documents(id,source_type,source_id,target_type,target_id,relation,created_by) VALUES(?,'bom',?,'bom',?,'version',?)",
         { replacements: [uuid(), bom.id, id, req.user.sub], transaction: tx },
@@ -508,7 +523,7 @@ production.put(
   '/work-orders/:id/status',
   permission('production', 'can_edit'),
   asyncHandler(async (req, res) => {
-    if (req.body.status === 'completed')
+    if (req.body.status === 'completed') {
       return ok(
         res,
         await completeWorkOrder(
@@ -519,6 +534,7 @@ production.put(
         ),
         'Work order completed',
       );
+    }
     return ok(
       res,
       await transition(
@@ -569,20 +585,21 @@ production.post(
   '/mrp/calculate',
   permission('production', 'can_view'),
   asyncHandler(async (req, res) => {
-    const demand = Number(req.body.demand || 0),
-      onHand = Number(req.body.on_hand || 0),
-      scheduled = Number(req.body.scheduled || 0),
-      safety = Number(req.body.safety_stock || 0);
+    const demand = Number(req.body.demand || 0);
+    const onHand = Number(req.body.on_hand || 0);
+    const scheduled = Number(req.body.scheduled || 0);
+    const safety = Number(req.body.safety_stock || 0);
     if (
       ![demand, onHand, scheduled, safety].every(Number.isFinite) ||
       [demand, onHand, scheduled, safety].some((v) => v < 0)
-    )
+    ) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'MRP quantities must be non-negative numbers',
       );
+    }
     return ok(res, {
       planned_quantity: Math.max(0, demand + safety - onHand - scheduled),
     });

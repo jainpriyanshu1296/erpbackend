@@ -58,15 +58,44 @@ async function lines(db, table, foreignKey, id, transaction) {
 
 workflow.post(
   '/purchase/requisitions/:id/submit',
-  permission('purchase', 'can_approve'),
+  permission('purchase', 'can_edit'),
   asyncHandler(async (req, res) => {
-    const [result] = await req.orgDb.query(
-      "UPDATE purchase_requisitions SET status='submitted' WHERE id=? AND status IN ('pending','draft')",
-      { replacements: [req.params.id] },
-    );
-    if (!result.affectedRows)
-      return fail(res, 409, 'INVALID_STATE', 'Requisition is not pending');
-    return ok(res, { id: req.params.id, status: 'submitted' });
+    const result = await req.orgDb.transaction(async (transaction) => {
+      const [requisitions] = await req.orgDb.query(
+        'SELECT id,status FROM purchase_requisitions WHERE id=? FOR UPDATE',
+        { replacements: [req.params.id], transaction },
+      );
+      if (!requisitions.length) return { error: 'NOT_FOUND' };
+      if (!['pending', 'draft'].includes(requisitions[0].status)) {
+        return { error: 'INVALID_STATE' };
+      }
+      const [[count]] = await req.orgDb.query(
+        'SELECT COUNT(*) AS total FROM purchase_requisition_items WHERE requisition_id=?',
+        { replacements: [req.params.id], transaction },
+      );
+      if (!Number(count.total)) return { error: 'EMPTY_REQUISITION' };
+      await req.orgDb.query(
+        "UPDATE purchase_requisitions SET status='submitted' WHERE id=?",
+        { replacements: [req.params.id], transaction },
+      );
+      await req.orgDb.query(
+        'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
+        {
+          replacements: [
+            uuid(), req.user.sub, 'purchase', 'purchase.requisition.submit',
+            'purchase_requisition', req.params.id,
+            JSON.stringify({ from: requisitions[0].status, to: 'submitted' }),
+          ],
+          transaction,
+        },
+      );
+      return { id: req.params.id, status: 'submitted' };
+    });
+    if (result.error) {
+      return fail(res, result.error === 'NOT_FOUND' ? 404 : 409, result.error,
+        result.error === 'EMPTY_REQUISITION' ? 'Add items before submitting' : 'Requisition cannot be submitted');
+    }
+    return ok(res, result);
   }),
 );
 
@@ -75,32 +104,49 @@ workflow.post(
   permission('purchase', 'can_edit'),
   asyncHandler(async (req, res) => {
     const items = Array.isArray(req.body.items) ? req.body.items : [];
-    if (!items.length)
+    if (!items.length) {
       throw invalid('At least one requisition item is required');
+    }
     const tx = await req.orgDb.transaction();
     try {
       const [requisitions] = await req.orgDb.query(
         'SELECT status FROM purchase_requisitions WHERE id=? FOR UPDATE',
         { replacements: [req.params.id], transaction: tx },
       );
-      if (!requisitions.length)
+      if (!requisitions.length) {
         throw Object.assign(new Error('Requisition not found'), {
           status: 404,
           code: 'NOT_FOUND',
         });
-      if (!['draft', 'pending'].includes(requisitions[0].status))
+      }
+      if (!['draft', 'pending'].includes(requisitions[0].status)) {
         throw Object.assign(
           new Error('Only draft or pending requisitions can be edited'),
           { status: 409, code: 'INVALID_STATE' },
         );
+      }
+      const itemIds = [...new Set(items.map((item) => item.item_id))];
+      if (itemIds.length !== items.length || items.some((item) =>
+        !item.item_id || !Number.isFinite(Number(item.quantity)) || Number(item.quantity) <= 0
+      )) {
+        throw invalid('Use unique active items with positive quantities');
+      }
+      const [activeItems] = await req.orgDb.query(
+        `SELECT id FROM item_master WHERE id IN (${itemIds.map(() => '?').join(',')}) AND is_active=1`,
+        { replacements: itemIds, transaction: tx },
+      );
+      if (activeItems.length !== itemIds.length) {
+        throw invalid('Choose active Item Master records');
+      }
       await req.orgDb.query(
         'DELETE FROM purchase_requisition_items WHERE requisition_id=?',
         { replacements: [req.params.id], transaction: tx },
       );
       for (const item of items) {
         const quantity = Number(item.quantity);
-        if (!item.item_id || !Number.isFinite(quantity) || quantity <= 0)
+        if (!item.item_id || !Number.isFinite(quantity) || quantity <= 0) {
           throw invalid('Each requisition item needs a positive quantity');
+        }
         await req.orgDb.query(
           'INSERT INTO purchase_requisition_items(id,requisition_id,item_id,quantity,rate) VALUES(?,?,?,?,?)',
           {
@@ -115,6 +161,11 @@ workflow.post(
           },
         );
       }
+      await req.orgDb.query(
+        'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
+        { replacements: [uuid(), req.user.sub, 'purchase', 'purchase.requisition.items.update',
+          'purchase_requisition', req.params.id, JSON.stringify({ item_count: items.length })], transaction: tx },
+      );
       await tx.commit();
       return ok(
         res,
@@ -144,8 +195,9 @@ workflow.post(
         'SELECT * FROM purchase_requisitions WHERE id=? FOR UPDATE',
         { replacements: [requisitionId], transaction: tx },
       );
-      if (!pr.length || !['submitted', 'approved'].includes(pr[0].status))
-        throw invalid('Only a submitted requisition can create an order');
+      if (!pr.length || pr[0].status !== 'approved') {
+        throw invalid('Only an approved requisition can create an order');
+      }
       const source = items?.length
         ? items
         : await lines(
@@ -155,12 +207,19 @@ workflow.post(
             requisitionId,
             tx,
           );
-      if (!vendorId || !warehouseId || !source.length)
+      if (!vendorId || !warehouseId || !source.length) {
         throw invalid(
           'vendor_id, warehouse_id and requisition items are required',
         );
-      const id = uuid(),
-        number = await nextNumber(req.orgDb, 'purchase_order', 'PO-', 5, tx);
+      }
+      const id = uuid();
+      const number = await nextNumber(
+        req.orgDb,
+        'purchase_order',
+        'PO-',
+        5,
+        tx,
+      );
       let total = 0;
       await req.orgDb.query(
         "INSERT INTO purchase_orders(id,po_number,vendor_id,warehouse_id,requisition_id,status,total_amount,created_by) VALUES(?,?,?,?,?,'draft',?,?)",
@@ -178,10 +237,11 @@ workflow.post(
         },
       );
       for (const item of source) {
-        const quantity = Number(item.quantity),
-          rate = Number(item.rate || 0);
-        if (!item.item_id || !Number.isFinite(quantity) || quantity <= 0)
+        const quantity = Number(item.quantity);
+        const rate = Number(item.rate || 0);
+        if (!item.item_id || !Number.isFinite(quantity) || quantity <= 0) {
           throw invalid('Each order item needs a positive quantity');
+        }
         total += quantity * rate;
         await req.orgDb.query(
           'INSERT INTO purchase_order_items(id,order_id,item_id,quantity,rate,requisition_item_id) VALUES(?,?,?,?,?,?)',
@@ -233,13 +293,14 @@ workflow.post(
       "UPDATE purchase_orders SET status='approved' WHERE id=? AND status='draft'",
       { replacements: [req.params.id] },
     );
-    if (!result.affectedRows)
+    if (!result.affectedRows) {
       return fail(
         res,
         409,
         'INVALID_STATE',
         'Only draft orders can be approved',
       );
+    }
     return ok(res, { id: req.params.id, status: 'approved' });
   }),
 );
@@ -249,24 +310,27 @@ workflow.post(
   permission('purchase', 'can_create'),
   asyncHandler(async (req, res) => {
     const { order_id: orderId, items } = req.body;
-    if (!orderId || !Array.isArray(items) || !items.length)
+    if (!orderId || !Array.isArray(items) || !items.length) {
       throw invalid('order_id and GRN items are required');
+    }
     const tx = await req.orgDb.transaction();
     try {
       const [orders] = await req.orgDb.query(
         'SELECT id,vendor_id,warehouse_id,status FROM purchase_orders WHERE id=? FOR UPDATE',
         { replacements: [orderId], transaction: tx },
       );
-      if (!orders.length)
+      if (!orders.length) {
         throw Object.assign(new Error('Purchase order not found'), {
           status: 404,
           code: 'NOT_FOUND',
         });
-      if (!['approved', 'part_received'].includes(orders[0].status))
+      }
+      if (!['approved', 'part_received'].includes(orders[0].status)) {
         throw Object.assign(
           new Error('Only approved purchase orders can receive goods'),
           { status: 409, code: 'INVALID_STATE' },
         );
+      }
       const grnId = uuid();
       const grnNumber = await nextNumber(req.orgDb, 'grn', 'GRN-', 5, tx);
       await req.orgDb.query(
@@ -283,10 +347,11 @@ workflow.post(
           !item.item_id ||
           !Number.isFinite(quantity) ||
           quantity <= 0
-        )
+        ) {
           throw invalid(
             'Each GRN item needs po_item_id, item_id and positive quantity',
           );
+        }
         await req.orgDb.query(
           'INSERT INTO grn_items(id,grn_id,po_item_id,item_id,quantity,rate) VALUES(?,?,?,?,?,?)',
           {
@@ -325,13 +390,14 @@ workflow.post(
       req.user.sub,
       req.body,
     );
-    if (result.error)
+    if (result.error) {
       return fail(
         res,
         result.error === 'NOT_FOUND' ? 404 : 409,
         result.error,
         'Receipt cannot be posted',
       );
+    }
     return ok(
       res,
       result,
@@ -349,10 +415,11 @@ workflow.post(
         req.orgDb,
         req.body.quotation_id,
       );
-    if (!result.already_converted)
+    if (!result.already_converted) {
       handleSalesOrderConfirmed(req.orgDb, result.id, req.user.sub).catch(
         (err) => console.error('[AUTOMATION ERROR]:', err.message),
       );
+    }
     return ok(
       res,
       result,
@@ -368,7 +435,9 @@ workflow.post(
   permission('sales', 'can_create'),
   asyncHandler(async (req, res) => {
     const service = require('../services/invoice.service');
-    if (!service.salesOrderId(req.body)) throw invalid('so_id is required');
+    if (!service.salesOrderId(req.body)) {
+      throw invalid('so_id is required');
+    }
     return ok(
       res,
       await service.createInvoice(req.orgDb, req.body, req.user.sub),
@@ -403,7 +472,9 @@ workflow.post(
       operator_id,
       description,
     } = req.body;
-    if (!stage_name) throw invalid('stage_name is required');
+    if (!stage_name) {
+      throw invalid('stage_name is required');
+    }
     const opId = uuid();
     await req.orgDb.query(
       `INSERT INTO wo_routing_operations(id, wo_id, sequence_no, stage_name, machine_id, operator_id, description, status)
@@ -458,7 +529,9 @@ workflow.put(
       vals.push(notes);
     }
 
-    if (!updates.length) throw invalid('No updates provided');
+    if (!updates.length) {
+      throw invalid('No updates provided');
+    }
 
     vals.push(req.params.opId, req.params.id);
     await req.orgDb.query(
@@ -537,7 +610,9 @@ workflow.get(
         { replacements: [invoiceIds] },
       );
       for (const l of lines) {
-        if (!linesMap[l.invoice_id]) linesMap[l.invoice_id] = [];
+        if (!linesMap[l.invoice_id]) {
+          linesMap[l.invoice_id] = [];
+        }
         linesMap[l.invoice_id].push(l);
       }
     }
@@ -778,7 +853,9 @@ workflow.post(
       'SELECT * FROM invoices WHERE id = ?',
       { replacements: [req.params.id] },
     );
-    if (!invs.length) return fail(res, 404, 'NOT_FOUND', 'Invoice not found');
+    if (!invs.length) {
+      return fail(res, 404, 'NOT_FOUND', 'Invoice not found');
+    }
     const invoice = invs[0];
 
     const [custs] = await req.orgDb.query(
@@ -842,8 +919,9 @@ workflow.post(
       'SELECT irn FROM invoices WHERE id = ?',
       { replacements: [req.params.id] },
     );
-    if (!invs.length || !invs[0].irn)
+    if (!invs.length || !invs[0].irn) {
       return fail(res, 400, 'NO_IRN', 'Invoice does not have an active IRN');
+    }
 
     const cancelResult = await cancelEinvoice({
       irn: invs[0].irn,
@@ -870,8 +948,9 @@ workflow.post(
       'SELECT * FROM delivery_challans WHERE id = ?',
       { replacements: [req.params.id] },
     );
-    if (!challans.length)
+    if (!challans.length) {
       return fail(res, 404, 'NOT_FOUND', 'Delivery challan not found');
+    }
     const challan = challans[0];
 
     const [custs] = await req.orgDb.query(
@@ -930,8 +1009,9 @@ workflow.post(
       'SELECT eway_bill_no FROM delivery_challans WHERE id = ?',
       { replacements: [req.params.id] },
     );
-    if (!ch.length || !ch[0].eway_bill_no)
+    if (!ch.length || !ch[0].eway_bill_no) {
       return fail(res, 400, 'NO_EWB', 'Challan has no active E-Way Bill');
+    }
 
     const cancelResult = await cancelEwayBill({
       ewayBillNo: ch[0].eway_bill_no,
@@ -994,7 +1074,9 @@ workflow.get(
       'SELECT * FROM item_master WHERE id = ?',
       { replacements: [req.params.id] },
     );
-    if (!items.length) return fail(res, 404, 'NOT_FOUND', 'Item not found');
+    if (!items.length) {
+      return fail(res, 404, 'NOT_FOUND', 'Item not found');
+    }
     return ok(res, generateItemQr(items[0]));
   }),
 );
@@ -1007,7 +1089,9 @@ workflow.get(
       'SELECT * FROM work_orders WHERE id = ?',
       { replacements: [req.params.id] },
     );
-    if (!wos.length) return fail(res, 404, 'NOT_FOUND', 'Work order not found');
+    if (!wos.length) {
+      return fail(res, 404, 'NOT_FOUND', 'Work order not found');
+    }
     return ok(res, generateWorkOrderQr(wos[0]));
   }),
 );

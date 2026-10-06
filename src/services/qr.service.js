@@ -44,8 +44,9 @@ function createQrSvg(text, size = 180) {
   }
 
   // 3. Alignment pattern (5x5 around center-bottom right)
-  const alignX = 18,
-    alignY = 18;
+  const alignX = 18;
+  const alignY = 18;
+
   for (let r = -2; r <= 2; r++) {
     for (let c = -2; c <= 2; c++) {
       if (Math.abs(r) === 2 || Math.abs(c) === 2 || (r === 0 && c === 0)) {
@@ -83,6 +84,7 @@ function createQrSvg(text, size = 180) {
   // Render to SVG paths
   const cellSize = (size / modulesCount).toFixed(2);
   let rects = '';
+
   for (let r = 0; r < modulesCount; r++) {
     for (let c = 0; c < modulesCount; c++) {
       if (matrix[r][c] === 1) {
@@ -111,7 +113,7 @@ function generateItemQr(item) {
     item_code: item.item_code,
     item_name: item.item_name,
     qr_payload: payload,
-    svg: svg,
+    svg,
     label_format: '50x25mm',
   };
 }
@@ -133,7 +135,7 @@ function generateWorkOrderQr(wo) {
     wo_id: wo.id,
     wo_number: wo.wo_number,
     qr_payload: payload,
-    svg: svg,
+    svg,
   };
 }
 

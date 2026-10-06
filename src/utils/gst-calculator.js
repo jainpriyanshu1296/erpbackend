@@ -1,11 +1,13 @@
 function calculateGST(items, orgState, customerState) {
   const interstate = orgState && customerState && orgState !== customerState;
+
   return (items || []).map((item) => {
     const taxable =
       Number(item.qty || item.quantity || 0) *
       Number(item.rate || item.unit_price || 0) *
       (1 - Number(item.discount || item.discount_percent || 0) / 100);
     const gst = Number(item.gst_rate || 0);
+
     const result = {
       ...item,
       taxable,
@@ -19,4 +21,5 @@ function calculateGST(items, orgState, customerState) {
     };
   });
 }
+
 module.exports = { calculateGST };

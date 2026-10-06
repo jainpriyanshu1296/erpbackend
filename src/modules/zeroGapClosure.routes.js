@@ -122,7 +122,11 @@ const resources = {
 };
 function bodyFor(keys, body) {
   const data = {};
-  for (const key of keys) if (body[key] !== undefined) data[key] = body[key];
+  for (const key of keys) {
+    if (body[key] !== undefined) {
+      data[key] = body[key];
+    }
+  }
   return data;
 }
 function routeFor(path, method) {
@@ -145,8 +149,8 @@ for (const [path, [table, keys, module]] of Object.entries(resources)) {
       const { page, limit, offset, search, sort, direction } =
         require('../utils/listQuery')(req.query, ['id', ...keys]);
       const searchKeys = keys.filter((key) => !key.endsWith('_json'));
-      const clauses = [],
-        values = [];
+      const clauses = [];
+      const values = [];
       if (search) {
         clauses.push(
           `(${searchKeys.map((key) => `CAST(${key} AS CHAR) LIKE ?`).join(' OR ')})`,
@@ -180,9 +184,11 @@ for (const [path, [table, keys, module]] of Object.entries(resources)) {
     asyncHandler(async (req, res) => {
       const data = bodyFor(keys, req.body);
       const required = table === 'approval' ? ['entity_type', 'entity_id'] : [];
-      for (const key of required)
-        if (!data[key])
+      for (const key of required) {
+        if (!data[key]) {
           return fail(res, 400, 'VALIDATION_ERROR', `${key} is required`);
+        }
+      }
       if (table === 'allocation') {
         return created(
           res,
@@ -211,7 +217,9 @@ router.patch(
   '/closure/:resource/:id/status',
   asyncHandler(async (req, res, next) => {
     const definition = resourceByPath[req.params.resource];
-    if (!definition) return next();
+    if (!definition) {
+      return next();
+    }
     if (
       ![
         'approval',
@@ -451,7 +459,9 @@ router.get(
 router.post(
   '/closure/:resource/:id/:action',
   asyncHandler(async (req, res, next) => {
-    if (!['approve', 'reject'].includes(req.params.action)) return next();
+    if (!['approve', 'reject'].includes(req.params.action)) {
+      return next();
+    }
     const definition = resourceByPath[req.params.resource];
     if (
       !definition ||
@@ -462,8 +472,9 @@ router.post(
         'salesReturn',
         'creditNote',
       ].includes(definition.table)
-    )
+    ) {
       return next();
+    }
     await moduleGuard(definition.module)(req, res, async () => {
       await permission(definition.module, 'can_edit')(req, res, async () => {
         const status =
@@ -519,13 +530,14 @@ router.post(
   permission('settings', 'can_approve'),
   asyncHandler(async (req, res) => {
     const { step_no, approver_role } = req.body;
-    if (!Number.isInteger(Number(step_no)) || !approver_role)
+    if (!Number.isInteger(Number(step_no)) || !approver_role) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'step_no and approver_role are required',
       );
+    }
     const tx = await req.orgDb.transaction();
     try {
       const id = uuid();

@@ -13,4 +13,5 @@ const masterDb = new Sequelize(
     pool: { max: 10, min: 0, acquire: 30000, idle: 10000 },
   },
 );
+
 module.exports = masterDb;

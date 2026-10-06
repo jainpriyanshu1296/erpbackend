@@ -8,8 +8,12 @@
  * Validate Indian vehicle registration number format (e.g. MP09AB1234 or DL1A1234)
  */
 function isValidVehicleNumber(vehicle) {
-  if (!vehicle) return false;
+  if (!vehicle) {
+    return false;
+  }
+
   const clean = vehicle.replace(/[\s-]/g, '').toUpperCase();
+
   return /^[A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{4}$/.test(clean);
 }
 

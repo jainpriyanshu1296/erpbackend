@@ -75,7 +75,9 @@ const reaper = setInterval(
   2 * 60 * 1000,
 );
 
-if (reaper.unref) reaper.unref();
+if (reaper.unref) {
+  reaper.unref();
+}
 
 /**
  * Gracefully close all tenant pools
@@ -83,9 +85,11 @@ if (reaper.unref) reaper.unref();
 async function closeOrgDbs() {
   clearInterval(reaper);
   const closers = [];
+
   for (const entry of poolCache.values()) {
     closers.push(entry.sequelize.close().catch(() => {}));
   }
+
   poolCache.clear();
   return Promise.all(closers);
 }

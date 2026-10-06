@@ -1,4 +1,5 @@
 require('dotenv').config();
+
 const bcrypt = require('bcryptjs');
 const mysql = require('mysql2/promise');
 const { v4: uuid } = require('uuid');
@@ -17,8 +18,11 @@ function argument(name) {
 
 function required(name, flag) {
   const value = argument(flag) || String(process.env[name] || '');
-  if (!/^\d{6}$/.test(value))
+
+  if (!/^\d{6}$/.test(value)) {
     throw new Error(`${name} is required and must be exactly 6 digits`);
+  }
+
   return value;
 }
 
@@ -29,6 +33,7 @@ async function main() {
     );
     return;
   }
+
   const tenantPassword = required('DEMO_ORG_PASSWORD', '--org-password');
   const superAdminPassword = required(
     'DEMO_SUPERADMIN_PASSWORD',
@@ -93,18 +98,27 @@ async function main() {
       'SELECT amount FROM plan_pricing WHERE plan=? AND duration_months=12 AND is_active=1 LIMIT 1',
       { replacements: [DEMO_PLAN], transaction: tx },
     );
-    if (!pricing.length) throw new Error('Yearly pro plan pricing is missing');
+
+    if (!pricing.length) {
+      throw new Error('Yearly pro plan pricing is missing');
+    }
+
     const [moduleRows] = await masterDb.query(
       'SELECT module_key FROM modules ORDER BY sort_order,id',
       { transaction: tx },
     );
-    if (!moduleRows.length) throw new Error('No modules are available');
+
+    if (!moduleRows.length) {
+      throw new Error('No modules are available');
+    }
+
     const total = Number(pricing[0].amount);
     const [subscriptions] = await masterDb.query(
       `SELECT id FROM subscriptions WHERE org_id=? AND plan=? AND duration_months=12 LIMIT 1`,
       { replacements: [organizationId, DEMO_PLAN], transaction: tx },
     );
     const subscriptionId = subscriptions[0]?.id || uuid();
+
     if (subscriptions.length) {
       await masterDb.query(
         `UPDATE subscriptions
@@ -193,6 +207,7 @@ async function main() {
       'SELECT id FROM users WHERE email=? LIMIT 1',
       [DEMO_EMAIL],
     );
+
     if (users.length) {
       await root.query(
         'UPDATE users SET password_hash=?,name=?,role="admin",is_active=1 WHERE id=?',

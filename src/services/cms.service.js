@@ -37,11 +37,17 @@ function validate(content) {
       code: 'INVALID_CMS_CONTENT',
     });
   };
-  if (!content || typeof content !== 'object' || Array.isArray(content))
+
+  if (!content || typeof content !== 'object' || Array.isArray(content)) {
     invalid('Content must be an object');
-  if (Object.keys(content).some((key) => !(key in defaults)))
+  }
+
+  if (Object.keys(content).some((key) => !(key in defaults))) {
     invalid('Unknown content field');
+  }
+
   const result = {};
+
   for (const [key, fallback] of Object.entries(defaults)) {
     const value = content[key];
     if (Array.isArray(fallback)) {
@@ -53,26 +59,34 @@ function validate(content) {
           (entry) =>
             typeof entry !== 'string' || !entry.trim() || entry.length > 300,
         )
-      )
+      ) {
         invalid(`Invalid ${key}`);
+      }
+
       result[key] = value.map((entry) => entry.trim());
     } else {
       if (
         typeof value !== 'string' ||
         value.length > 2000 ||
         (key !== 'contact_email' && !value.trim())
-      )
+      ) {
         invalid(`Invalid ${key}`);
+      }
+
       result[key] = value.trim();
     }
   }
+
   if (
     result.contact_email &&
     !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(result.contact_email)
-  )
+  ) {
     invalid('Invalid contact email');
+  }
+
   return result;
 }
+
 const decode = (value) =>
   typeof value === 'string' ? JSON.parse(value) : value;
 
@@ -94,14 +108,17 @@ async function read(publishedOnly = false) {
 
 async function save({ content, revision, publish }, actor) {
   const validated = validate(content);
+
   if (
     !Number.isSafeInteger(revision) ||
     revision < 0 ||
     typeof publish !== 'boolean'
-  )
+  ) {
     throw Object.assign(new Error('revision and publish are required'), {
       status: 400,
     });
+  }
+
   return masterDb.transaction(async (transaction) => {
     await masterDb.query(
       'INSERT IGNORE INTO public_pages(page_key,draft_content,revision) VALUES(?,?,0)',
@@ -111,12 +128,16 @@ async function save({ content, revision, publish }, actor) {
       'SELECT revision FROM public_pages WHERE page_key=? FOR UPDATE',
       { replacements: ['landing'], transaction },
     );
-    if (Number(rows[0].revision) !== revision)
+
+    if (Number(rows[0].revision) !== revision) {
       throw Object.assign(new Error('Content changed. Reload before saving.'), {
         status: 409,
         code: 'CMS_REVISION_CONFLICT',
       });
+    }
+
     const json = JSON.stringify(validated);
+
     await masterDb.query(
       `UPDATE public_pages SET draft_content=?,revision=revision+1,updated_by=?${publish ? ',published_content=?,published_at=NOW()' : ''} WHERE page_key=?`,
       {
@@ -124,6 +145,7 @@ async function save({ content, revision, publish }, actor) {
         transaction,
       },
     );
+
     return { revision: revision + 1, published: publish };
   });
 }

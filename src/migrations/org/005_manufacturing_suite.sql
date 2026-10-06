@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS wo_routing_operations (
   actual_start DATETIME,
   actual_end DATETIME,
   status VARCHAR(30) NOT NULL DEFAULT 'pending',
-  completed_qty DECIMAL(14,3) DEFAULT 0,
-  rejected_qty DECIMAL(14,3) DEFAULT 0,
+  completed_qty DECIMAL(14, 3) DEFAULT 0,
+  rejected_qty DECIMAL(14, 3) DEFAULT 0,
   notes TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_routing_wo (wo_id, sequence_no)

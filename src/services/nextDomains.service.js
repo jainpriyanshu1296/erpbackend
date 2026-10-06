@@ -82,14 +82,16 @@ const DEFINITIONS = {
 };
 
 function assertInput(def, body) {
-  for (const key of def.create)
+  for (const key of def.create) {
     if (body[key] === undefined || body[key] === null || body[key] === '') {
       const error = new Error(`${key} is required`);
       error.status = 400;
       error.code = 'VALIDATION_ERROR';
       throw error;
     }
+  }
 }
+
 async function audit(db, req, action, referenceId, changes) {
   await db.query(
     'INSERT INTO activity_log(id,user_id,module,action,reference_type,reference_id,changes,ip_address) VALUES(?,?,?,?,?,?,?,?)',
@@ -108,17 +110,23 @@ async function audit(db, req, action, referenceId, changes) {
     },
   );
 }
+
 async function idempotent(db, key, operation, work) {
-  if (!key) return work();
+  if (!key) {
+    return work();
+  }
   const [existing] = await db.query(
     'SELECT response_json FROM domain_idempotency WHERE idempotency_key=? AND operation=? LIMIT 1',
     { replacements: [key, operation] },
   );
-  if (existing[0]) return JSON.parse(existing[0].response_json);
+  if (existing[0]) {
+    return JSON.parse(existing[0].response_json);
+  }
   // The write operation owns the idempotency insert so it can commit it in
   // the same transaction as the domain row and audit event.
   return work();
 }
+
 async function create(req, domain, body) {
   const def = DEFINITIONS[domain];
   assertInput(def, body);
@@ -134,13 +142,14 @@ async function create(req, domain, body) {
         const values = def.columns.map((c) =>
           body[c] === undefined ? null : body[c],
         );
-        if (domain === 'leaves' && values[3] == null)
+        if (domain === 'leaves' && values[3] == null) {
           values[3] = Math.max(
             1,
             Math.floor(
               (new Date(body.to_date) - new Date(body.from_date)) / 86400000,
             ) + 1,
           );
+        }
         await req.orgDb.query(
           `INSERT INTO ${def.table}(id,${def.columns.join(',')}) VALUES(?,${def.columns.map(() => '?').join(',')})`,
           { replacements: [id, ...values], transaction: tx },
@@ -175,6 +184,7 @@ async function create(req, domain, body) {
     },
   );
 }
+
 async function list(req, domain) {
   const def = DEFINITIONS[domain];
   const [rows] = await req.orgDb.query(
@@ -182,10 +192,13 @@ async function list(req, domain) {
   );
   return rows;
 }
+
 async function update(req, domain, id, body) {
   const def = DEFINITIONS[domain];
   const fields = def.columns.filter((c) => body[c] !== undefined);
-  if (!fields.length) return list(req, domain);
+  if (!fields.length) {
+    return list(req, domain);
+  }
   const tx = await req.orgDb.transaction();
   req.__domainTransaction = tx;
   try {
@@ -213,6 +226,7 @@ async function update(req, domain, id, body) {
     delete req.__domainTransaction;
   }
 }
+
 async function transition(req, domain, id, status) {
   const allowed = {
     quality: ['pending', 'passed', 'failed', 'rework'],
@@ -257,16 +271,18 @@ async function transition(req, domain, id, status) {
     delete req.__domainTransaction;
   }
 }
+
 async function createJournal(req, body) {
   assertInput(
     { create: ['journal_number', 'journal_date'], columns: [] },
     body,
   );
-  if (!Array.isArray(body.lines) || body.lines.length < 2)
+  if (!Array.isArray(body.lines) || body.lines.length < 2) {
     throw Object.assign(new Error('At least two journal lines are required'), {
       status: 400,
       code: 'VALIDATION_ERROR',
     });
+  }
   const debit = body.lines.reduce(
     (sum, line) => sum + Number(line.debit || 0),
     0,
@@ -275,18 +291,25 @@ async function createJournal(req, body) {
     (sum, line) => sum + Number(line.credit || 0),
     0,
   );
-  if (!Number.isFinite(debit) || Math.abs(debit - credit) > 0.005 || debit <= 0)
+  if (
+    !Number.isFinite(debit) ||
+    Math.abs(debit - credit) > 0.005 ||
+    debit <= 0
+  ) {
     throw Object.assign(new Error('Journal debits and credits must balance'), {
       status: 400,
       code: 'VALIDATION_ERROR',
     });
+  }
   const key = req.get?.('Idempotency-Key');
   if (key) {
     const [existing] = await req.orgDb.query(
       'SELECT response_json FROM domain_idempotency WHERE idempotency_key=? AND operation=? LIMIT 1',
       { replacements: [key, 'finance.journal.create'] },
     );
-    if (existing[0]) return JSON.parse(existing[0].response_json);
+    if (existing[0]) {
+      return JSON.parse(existing[0].response_json);
+    }
   }
   for (const line of body.lines) {
     if (
@@ -322,7 +345,7 @@ async function createJournal(req, body) {
         transaction: tx,
       },
     );
-    for (const line of body.lines)
+    for (const line of body.lines) {
       await req.orgDb.query(
         'INSERT INTO finance_journal_lines(id,journal_id,account_id,debit,credit) VALUES(?,?,?,?,?)',
         {
@@ -336,6 +359,7 @@ async function createJournal(req, body) {
           transaction: tx,
         },
       );
+    }
     const result = {
       id,
       journal_number: body.journal_number,
@@ -343,7 +367,7 @@ async function createJournal(req, body) {
       status: 'draft',
     };
     await audit(req.orgDb, req, 'finance.journal.create', id, { total: debit });
-    if (key)
+    if (key) {
       await req.orgDb.query(
         'INSERT INTO domain_idempotency(id,idempotency_key,operation,response_json) VALUES(?,?,?,?)',
         {
@@ -356,6 +380,7 @@ async function createJournal(req, body) {
           transaction: tx,
         },
       );
+    }
     await tx.commit();
     return result;
   } catch (error) {
@@ -365,6 +390,7 @@ async function createJournal(req, body) {
     delete req.__domainTransaction;
   }
 }
+
 module.exports = {
   DEFINITIONS,
   create,

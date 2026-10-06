@@ -95,12 +95,13 @@ router.post(
   ...secure('payroll', 'can_edit'),
   asyncHandler(async (req, res) => {
     const { employee_id, gross_amount, deductions = 0 } = req.body;
-    if (!employee_id || Number(gross_amount) < 0 || Number(deductions) < 0)
+    if (!employee_id || Number(gross_amount) < 0 || Number(deductions) < 0) {
       return res.status(400).json({
         success: false,
         error: 'VALIDATION_ERROR',
         message: 'Valid employee and amounts are required',
       });
+    }
     const id = uuid();
     const net = Number(gross_amount) - Number(deductions);
     await req.orgDb.query(
@@ -146,12 +147,15 @@ router.get(
     const offset = (page - 1) * limit;
     const conditions = [];
     const replacements = [];
-    if (period === 'month')
+    if (period === 'month') {
       conditions.push('created_at >= DATE_FORMAT(CURRENT_DATE, "%Y-%m-01")');
-    if (period === 'quarter')
+    }
+    if (period === 'quarter') {
       conditions.push('created_at >= DATE_SUB(CURRENT_DATE, INTERVAL 3 MONTH)');
-    if (period === 'year')
+    }
+    if (period === 'year') {
       conditions.push('created_at >= DATE_FORMAT(CURRENT_DATE, "%Y-01-01")');
+    }
     if (search) {
       conditions.push('report_key LIKE ?');
       replacements.push(`%${search}%`);

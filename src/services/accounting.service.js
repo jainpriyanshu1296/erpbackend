@@ -21,7 +21,9 @@ async function account(db, code, transaction) {
     'SELECT id FROM finance_accounts WHERE code=? FOR UPDATE',
     { replacements: [code], transaction },
   );
-  if (rows.length) return rows[0].id;
+  if (rows.length) {
+    return rows[0].id;
+  }
   const item = DEFAULT_ACCOUNTS.find((a) => a[0] === code) || [
     code,
     code,
@@ -54,15 +56,17 @@ async function postJournal(
       transaction,
     },
   );
-  if (existing.length)
+  if (existing.length) {
     return { journal_id: existing[0].id, already_applied: true };
+  }
   const debit = lines.reduce((n, l) => n + Number(l.debit || 0), 0);
   const credit = lines.reduce((n, l) => n + Number(l.credit || 0), 0);
-  if (Math.round(debit * 100) !== Math.round(credit * 100))
+  if (Math.round(debit * 100) !== Math.round(credit * 100)) {
     throw Object.assign(new Error('Accounting journal is not balanced'), {
       status: 500,
       code: 'UNBALANCED_JOURNAL',
     });
+  }
   const id = uuid();
   await db.query(
     'INSERT INTO finance_journals(id,journal_number,journal_date,narration,status,total_debit,created_by,source_type,source_id) VALUES(?,?,COALESCE(?,CURDATE()),?,?,?,? ,?,?)',
@@ -130,7 +134,9 @@ async function taxSnapshot(
       transaction,
     },
   );
-  if (existing.length) return existing[0].id;
+  if (existing.length) {
+    return existing[0].id;
+  }
   const id = uuid();
   const calculation = {
     taxable: Number(taxable),
@@ -157,7 +163,7 @@ async function taxSnapshot(
     ['sgst', sgst, direction],
     ['igst', igst, direction],
   ];
-  for (const [type, amount, direction] of taxes)
+  for (const [type, amount, direction] of taxes) {
     if (Number(amount)) {
       await db.query(
         'INSERT INTO gst_ledger_entries(id,snapshot_id,tax_type,amount,direction) VALUES(?,?,?,?,?)',
@@ -167,6 +173,7 @@ async function taxSnapshot(
         },
       );
     }
+  }
   return id;
 }
 
@@ -175,11 +182,12 @@ async function postInvoiceEffect(db, invoiceId, userId, transaction) {
     'SELECT * FROM invoices WHERE id=? FOR UPDATE',
     { replacements: [invoiceId], transaction },
   );
-  if (!rows.length)
+  if (!rows.length) {
     throw Object.assign(new Error('Invoice not found'), {
       status: 404,
       code: 'NOT_FOUND',
     });
+  }
   const invoice = rows[0];
   const [items] = await db.query(
     'SELECT taxable,cgst,sgst,igst,total FROM invoice_item_lines WHERE invoice_id=?',
@@ -194,9 +202,11 @@ async function postInvoiceEffect(db, invoiceId, userId, transaction) {
     }),
     { taxable: 0, cgst: 0, sgst: 0, igst: 0 },
   );
-  if (!items.length) totals.taxable = Number(invoice.total_amount || 0);
-  const ar = await account(db, '1100', transaction),
-    sales = await account(db, '4000', transaction);
+  if (!items.length) {
+    totals.taxable = Number(invoice.total_amount || 0);
+  }
+  const ar = await account(db, '1100', transaction);
+  const sales = await account(db, '4000', transaction);
   const output = [
     await account(db, '2200', transaction),
     await account(db, '2210', transaction),
@@ -269,17 +279,18 @@ async function postVendorInvoiceEffect(db, documentId, userId, transaction) {
     'SELECT * FROM finance_documents WHERE id=? FOR UPDATE',
     { replacements: [documentId], transaction },
   );
-  if (!rows.length)
+  if (!rows.length) {
     throw Object.assign(new Error('Payable document not found'), {
       status: 404,
       code: 'NOT_FOUND',
     });
+  }
   const doc = rows[0];
   const amount = Number(doc.amount || 0);
   const taxable = Number(doc.taxable_amount ?? amount);
-  const cgst = Number(doc.cgst || 0),
-    sgst = Number(doc.sgst || 0),
-    igst = Number(doc.igst || 0);
+  const cgst = Number(doc.cgst || 0);
+  const sgst = Number(doc.sgst || 0);
+  const igst = Number(doc.igst || 0);
   const payable = await account(db, '2100', transaction);
   const purchase = await account(db, '1200', transaction);
   const inputs = [

@@ -1,4 +1,5 @@
 require('dotenv').config();
+
 const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql2/promise');
@@ -17,15 +18,19 @@ function splitConditionalStatements(sql) {
   const directives = [];
   let condition = null;
   let buffer = '';
+
   for (const line of sql.split(/\r?\n/)) {
     const directive = line.match(
       /^\s*--\s*@if-(column|columns|table)\s+(.+?)\s*$/i,
     );
+
     if (directive) {
-      if (buffer.trim())
+      if (buffer.trim()) {
         throw new Error(
           'Migration condition must appear immediately before a statement',
         );
+      }
+
       condition = {
         kind: directive[1].toLowerCase(),
         args: directive[2]
@@ -35,22 +40,39 @@ function splitConditionalStatements(sql) {
       };
       continue;
     }
-    if (/^\s*--/.test(line) || /^\s*$/.test(line)) continue;
+
+    if (/^\s*--/.test(line) || /^\s*$/.test(line)) {
+      continue;
+    }
+
     buffer += `${line}\n`;
     let offset;
+
     while ((offset = buffer.indexOf(';')) !== -1) {
       const statement = buffer.slice(0, offset).trim();
+
       buffer = buffer.slice(offset + 1);
-      if (statement) directives.push({ statement, condition });
+
+      if (statement) {
+        directives.push({ statement, condition });
+      }
+
       condition = null;
     }
   }
-  if (buffer.trim()) directives.push({ statement: buffer.trim(), condition });
+
+  if (buffer.trim()) {
+    directives.push({ statement: buffer.trim(), condition });
+  }
+
   return directives;
 }
 
 async function conditionMatches(conn, dbName, condition) {
-  if (!condition) return true;
+  if (!condition) {
+    return true;
+  }
+
   if (condition.kind === 'table') {
     const [rows] = await conn.query(
       'SELECT 1 FROM information_schema.tables WHERE table_schema=? AND table_name=? LIMIT 1',
@@ -58,11 +80,15 @@ async function conditionMatches(conn, dbName, condition) {
     );
     return rows.length > 0;
   }
+
   const [table, ...columns] = condition.args;
-  if (!table || !columns.length)
+
+  if (!table || !columns.length) {
     throw new Error(
       `Invalid migration condition: ${condition.kind} ${condition.args.join(' ')}`,
     );
+  }
+
   const [rows] = await conn.query(
     'SELECT column_name FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_name IN (?)',
     [dbName, table, columns],
@@ -75,7 +101,11 @@ async function conditionMatches(conn, dbName, condition) {
 async function executeMigrationSql(conn, dbName, sql) {
   for (const entry of splitConditionalStatements(sql)) {
     const { statement, condition } = entry;
-    if (!(await conditionMatches(conn, dbName, condition))) continue;
+
+    if (!(await conditionMatches(conn, dbName, condition))) {
+      continue;
+    }
+
     const indexMatch = statement.match(
       /^CREATE\s+(UNIQUE\s+)?INDEX\s+([`A-Za-z0-9_]+)\s+ON\s+([`A-Za-z0-9_.]+)\s*\(([^)]+)\)$/i,
     );
@@ -92,8 +122,10 @@ async function executeMigrationSql(conn, dbName, sql) {
           `CREATE ${unique || ''}INDEX \`${indexName}\` ON \`${table}\` (${columns})`,
         );
       }
+
       continue;
     }
+
     if (
       !/^ALTER\s+TABLE\s+/i.test(statement) ||
       !/ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i.test(statement)
@@ -105,16 +137,21 @@ async function executeMigrationSql(conn, dbName, sql) {
     const match = statement.match(
       /^ALTER\s+TABLE\s+([`A-Za-z0-9_.]+)\s+([\s\S]+)$/i,
     );
-    if (!match)
+
+    if (!match) {
       throw new Error(`Unsupported ALTER TABLE migration syntax: ${statement}`);
+    }
+
     const table = match[1].replace(/`/g, '');
     const additions = [
       ...match[2].matchAll(
         /ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+([`A-Za-z0-9_]+)\s+([\s\S]*?)(?=\s*,\s*ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+|$)/gi,
       ),
     ];
-    if (!additions.length)
+
+    if (!additions.length) {
       throw new Error(`Unsupported ALTER TABLE migration syntax: ${statement}`);
+    }
 
     for (const [, rawColumn, definition] of additions) {
       const column = rawColumn.replace(/`/g, '');
@@ -122,7 +159,11 @@ async function executeMigrationSql(conn, dbName, sql) {
         `SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_name=? LIMIT 1`,
         [dbName, table, column],
       );
-      if (columns.length) continue;
+
+      if (columns.length) {
+        continue;
+      }
+
       await conn.query(
         `ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition.trim()}`,
       );
@@ -166,8 +207,11 @@ async function applyMigrationsToDb(conn, dbName, kind) {
     'SELECT owner_id FROM migration_locks WHERE lock_name=?',
     [lockName],
   );
-  if (!locks.length || locks[0].owner_id !== owner)
+
+  if (!locks.length || locks[0].owner_id !== owner) {
     throw new Error(`Migration already running for ${dbName}`);
+  }
+
   try {
     const [appliedRows] = await conn.query(
       'SELECT migration_name FROM _migrations',
@@ -232,9 +276,12 @@ async function run() {
         const [orgs] = await conn.query(
           'SELECT db_name, company_name FROM organizations WHERE is_active=1',
         );
+
         console.log(`Found ${orgs.length} active organizations for migration.`);
-        for (const org of orgs)
+
+        for (const org of orgs) {
           await applyMigrationsToDb(conn, org.db_name, 'org');
+        }
       } else {
         if (!target) {
           throw new Error(
@@ -246,6 +293,7 @@ async function run() {
     } else {
       throw new Error(`Unknown migration kind: ${kind}. Use 'master' or 'org'`);
     }
+
     console.log('\nMigration run completed successfully.');
   } finally {
     await conn.end();

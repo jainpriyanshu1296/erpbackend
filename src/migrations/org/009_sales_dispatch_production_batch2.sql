@@ -1,6 +1,11 @@
-ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS status VARCHAR(30) NOT NULL DEFAULT 'draft';
-ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL;
-ALTER TABLE delivery_challans ADD COLUMN IF NOT EXISTS dispatched_at DATETIME NULL;
+ALTER TABLE delivery_challans
+  ADD COLUMN IF NOT EXISTS status VARCHAR(30) NOT NULL DEFAULT 'draft';
+
+ALTER TABLE delivery_challans
+  ADD COLUMN IF NOT EXISTS warehouse_id VARCHAR(36) NULL;
+
+ALTER TABLE delivery_challans
+  ADD COLUMN IF NOT EXISTS dispatched_at DATETIME NULL;
 
 CREATE TABLE IF NOT EXISTS dispatch_effects (
   id VARCHAR(36) PRIMARY KEY,

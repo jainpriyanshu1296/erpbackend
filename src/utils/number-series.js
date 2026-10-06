@@ -5,19 +5,23 @@ async function getNextNumber(db, type) {
       'SELECT prefix,next_number,padding FROM number_series WHERE series_key=? FOR UPDATE',
       { replacements: [type], transaction: tx },
     );
-    const current = Number(rows[0]?.next_number || 1),
-      prefix = rows[0]?.prefix || `${type.toUpperCase()}-`,
-      padding = Number(rows[0]?.padding || 5);
-    if (rows.length)
+
+    const current = Number(rows[0]?.next_number || 1);
+    const prefix = rows[0]?.prefix || `${type.toUpperCase()}-`;
+    const padding = Number(rows[0]?.padding || 5);
+
+    if (rows.length) {
       await db.query(
         'UPDATE number_series SET next_number=next_number+1 WHERE series_key=?',
         { replacements: [type], transaction: tx },
       );
-    else
+    } else {
       await db.query(
         'INSERT INTO number_series(series_key,prefix,next_number,padding) VALUES(?,?,2,?)',
         { replacements: [type, prefix, padding], transaction: tx },
       );
+    }
+
     await tx.commit();
     return `${prefix}${new Date().getFullYear()}-${String(current).padStart(padding, '0')}`;
   } catch (e) {
@@ -25,4 +29,5 @@ async function getNextNumber(db, type) {
     throw e;
   }
 }
+
 module.exports = { getNextNumber };

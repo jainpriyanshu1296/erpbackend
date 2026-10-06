@@ -46,13 +46,14 @@ const login = asyncHandler(async (req, res) => {
   const email = normalizeEmail(req.body.email);
   const subdomain = tenantSubdomain(req);
   const requestedSlug = subdomain;
-  if (!requestedSlug)
+  if (!requestedSlug) {
     return fail(
       res,
       400,
       'TENANT_DOMAIN_REQUIRED',
       'Open the organization subdomain to sign in',
     );
+  }
   const [orgs] = await masterDb.query(
     subdomain
       ? `SELECT o.* FROM organizations o INNER JOIN organization_domains d ON d.organization_id=o.id
@@ -60,38 +61,43 @@ const login = asyncHandler(async (req, res) => {
       : 'SELECT * FROM organizations WHERE slug=? AND is_active=1 LIMIT 1',
     { replacements: [requestedSlug] },
   );
-  if (!orgs.length)
+  if (!orgs.length) {
     return fail(
       res,
       401,
       'INVALID_CREDENTIALS',
       'Invalid organization or credentials',
     );
-  if (orgs[0].is_suspended)
+  }
+  if (orgs[0].is_suspended) {
     return fail(
       res,
       403,
       'ORG_SUSPENDED',
       'This organization has been suspended. Please contact support.',
     );
-  if (!['active', 'trial'].includes(orgs[0].status || 'active'))
+  }
+  if (!['active', 'trial'].includes(orgs[0].status || 'active')) {
     return fail(res, 403, 'ORG_UNAVAILABLE', 'This organization is not active');
+  }
   const org = orgs[0];
   const user = await findUser(getOrgDb(org.db_name), email);
   if (
     !user ||
     !user.is_active ||
     !(await bcrypt.compare(password || '', user.password_hash))
-  )
+  ) {
     return fail(res, 401, 'INVALID_CREDENTIALS', 'Invalid credentials');
+  }
   const orgDb = getOrgDb(org.db_name);
   const token = signToken(user, org);
   const refresh_token = await issueRefresh(orgDb, user, org);
   setSessionCookies(res, token, refresh_token);
-  if (orgDb.query)
+  if (orgDb.query) {
     await orgDb.query('UPDATE users SET last_login=NOW() WHERE id=?', {
       replacements: [user.id],
     });
+  }
   return ok(
     res,
     {
@@ -115,7 +121,7 @@ const register = asyncHandler(async (req, res) => {
     'plan',
     'duration_months',
   ].filter((k) => !req.body[k]);
-  if (missing.length)
+  if (missing.length) {
     return fail(
       res,
       400,
@@ -123,28 +129,32 @@ const register = asyncHandler(async (req, res) => {
       'Required fields are missing',
       missing,
     );
+  }
   const result = await createPendingOrganization(req.body);
   return created(res, result, 'Organization created and awaiting payment');
 });
 const me = asyncHandler(async (req, res) => ok(res, req.user));
 const refresh = asyncHandler(async (req, res) => {
   const raw = readCookie(req, 'erp_refresh') || req.body?.refresh_token;
-  if (!raw)
+  if (!raw) {
     return fail(res, 400, 'VALIDATION_ERROR', 'Refresh session is required');
+  }
   let decoded;
   try {
     decoded = jwt.verify(raw, secret());
   } catch {
     decoded = null;
   }
-  if (!decoded?.orgId || !decoded?.sub)
+  if (!decoded?.orgId || !decoded?.sub) {
     return fail(res, 401, 'UNAUTHENTICATED', 'Invalid refresh token');
+  }
   const [orgs] = await masterDb.query(
     'SELECT * FROM organizations WHERE id=? AND is_active=1',
     { replacements: [decoded.orgId] },
   );
-  if (!orgs.length)
+  if (!orgs.length) {
     return fail(res, 401, 'UNAUTHENTICATED', 'Organization unavailable');
+  }
   const orgDb = getOrgDb(orgs[0].db_name);
   const hash = crypto.createHash('sha256').update(raw).digest('hex');
   const [rows] = await orgDb.query(
@@ -157,11 +167,12 @@ const refresh = asyncHandler(async (req, res) => {
       'SELECT id FROM refresh_tokens WHERE token_hash=? AND revoked_at IS NOT NULL',
       { replacements: [hash] },
     );
-    if (reused.length)
+    if (reused.length) {
       await orgDb.query(
         'UPDATE refresh_tokens SET revoked_at=COALESCE(revoked_at,NOW()) WHERE user_id=?',
         { replacements: [decoded.sub] },
       );
+    }
     return fail(
       res,
       401,
@@ -200,29 +211,32 @@ const logout = asyncHandler(async (req, res) => {
     'SELECT db_name FROM organizations WHERE id=?',
     { replacements: [req.user.orgId] },
   );
-  if (orgs.length)
+  if (orgs.length) {
     await getOrgDb(orgs[0].db_name).query(
       'UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=? AND revoked_at IS NULL',
       { replacements: [req.user.sub] },
     );
+  }
   clearSessionCookies(res);
   return ok(res, null, 'Logged out');
 });
 const forgotPassword = asyncHandler(async (req, res) => {
   const slug = tenantSubdomain(req);
-  if (!slug)
+  if (!slug) {
     return fail(
       res,
       400,
       'TENANT_DOMAIN_REQUIRED',
       'Open the organization subdomain to reset the password',
     );
+  }
   const [orgs] = await masterDb.query(
     'SELECT db_name, is_suspended FROM organizations WHERE slug=? AND is_active=1',
     { replacements: [slug] },
   );
-  if (!orgs.length || orgs[0].is_suspended)
+  if (!orgs.length || orgs[0].is_suspended) {
     return ok(res, null, 'If the account exists, reset instructions were sent');
+  }
   const db = getOrgDb(orgs[0].db_name);
   const [users] = await db.query(
     'SELECT id FROM users WHERE email=? AND is_active=1',
@@ -251,32 +265,35 @@ const forgotPassword = asyncHandler(async (req, res) => {
 });
 const resetPassword = asyncHandler(async (req, res) => {
   const slug = tenantSubdomain(req);
-  if (!slug)
+  if (!slug) {
     return fail(
       res,
       400,
       'TENANT_DOMAIN_REQUIRED',
       'Open the organization subdomain to reset the password',
     );
+  }
   const [orgs] = await masterDb.query(
     'SELECT db_name FROM organizations WHERE slug=? AND is_active=1',
     { replacements: [slug] },
   );
-  if (!orgs.length || !req.body.token || !req.body.password)
+  if (!orgs.length || !req.body.token || !req.body.password) {
     return fail(
       res,
       400,
       'VALIDATION_ERROR',
       'Valid token and password are required',
     );
+  }
   const db = getOrgDb(orgs[0].db_name);
   const hash = crypto.createHash('sha256').update(req.body.token).digest('hex');
   const [rows] = await db.query(
     'SELECT * FROM password_reset_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>NOW()',
     { replacements: [hash] },
   );
-  if (!rows.length)
+  if (!rows.length) {
     return fail(res, 400, 'INVALID_TOKEN', 'Reset token is invalid or expired');
+  }
   await db.query('UPDATE users SET password_hash=? WHERE id=?', {
     replacements: [await bcrypt.hash(req.body.password, 12), rows[0].user_id],
   });
@@ -289,13 +306,14 @@ const resetPassword = asyncHandler(async (req, res) => {
 const adminLogin = asyncHandler(async (req, res) => {
   const { password } = req.body;
   const email = normalizeEmail(req.body.email);
-  if (!email || !password)
+  if (!email || !password) {
     return fail(
       res,
       400,
       'VALIDATION_ERROR',
       'Email and password are required',
     );
+  }
 
   const [admins] = await masterDb.query(
     'SELECT * FROM admin_users WHERE email = ? AND is_active = 1',
@@ -314,13 +332,14 @@ const adminLogin = asyncHandler(async (req, res) => {
   }
 
   const admin = admins[0];
-  if (admin.must_change_password)
+  if (admin.must_change_password) {
     return fail(
       res,
       403,
       'PASSWORD_ROTATION_REQUIRED',
       'Administrator password rotation is required',
     );
+  }
   const token = jwt.sign(
     {
       sub: admin.id,

@@ -1,20 +1,30 @@
 const { v4: uuid } = require('uuid');
 const { createHash } = require('node:crypto');
+
 const error = (message) =>
   Object.assign(new Error(message), { status: 409, code: 'INVOICE_CONFLICT' });
+
 function salesOrderId(body) {
   const ids = [body.so_id, body.sales_order_id, body.order_id].filter(Boolean);
-  if (new Set(ids).size > 1) throw error('Conflicting sales order identifiers');
+
+  if (new Set(ids).size > 1) {
+    throw error('Conflicting sales order identifiers');
+  }
+
   return ids[0] || null;
 }
+
 function priceLines(items, interstate) {
-  if (!Array.isArray(items) || !items.length)
+  if (!Array.isArray(items) || !items.length) {
     throw error('Invoice items are required');
+  }
+
   return items.map((item) => {
-    const quantity = Number(item.quantity),
-      rate = Number(item.rate);
-    const discount = Number(item.discount_percent || 0),
-      gst = Number(item.gst_rate || 0);
+    const quantity = Number(item.quantity);
+    const rate = Number(item.rate);
+    const discount = Number(item.discount_percent || 0);
+    const gst = Number(item.gst_rate || 0);
+
     if (
       !item.item_id ||
       !Number.isFinite(quantity) ||
@@ -27,13 +37,16 @@ function priceLines(items, interstate) {
       !Number.isFinite(gst) ||
       gst < 0 ||
       gst > 100
-    )
+    ) {
       throw error('Invalid invoice item quantity, rate, discount or tax');
+    }
+
     const round = (value) => Math.round(value * 100) / 100;
     const taxable = round(quantity * rate * (1 - discount / 100));
-    const cgst = interstate ? 0 : round((taxable * gst) / 200),
-      sgst = cgst;
+    const cgst = interstate ? 0 : round((taxable * gst) / 200);
+    const sgst = cgst;
     const igst = interstate ? round((taxable * gst) / 100) : 0;
+
     return {
       ...item,
       quantity,
@@ -48,40 +61,54 @@ function priceLines(items, interstate) {
     };
   });
 }
+
 function assertFullyDispatched(ordered, sent) {
-  if (!ordered.length) throw error('Sales order has no items');
-  const required = new Map(),
-    delivered = new Map();
-  for (const line of ordered)
+  if (!ordered.length) {
+    throw error('Sales order has no items');
+  }
+
+  const required = new Map();
+  const delivered = new Map();
+
+  for (const line of ordered) {
     required.set(
       line.item_id,
       (required.get(line.item_id) || 0) + Number(line.quantity),
     );
+  }
+
   for (const line of sent) {
-    if (!Number.isFinite(Number(line.quantity)) || Number(line.quantity) < 0)
+    if (!Number.isFinite(Number(line.quantity)) || Number(line.quantity) < 0) {
       throw error('Invalid dispatched quantity');
+    }
+
     delivered.set(
       line.item_id,
       (delivered.get(line.item_id) || 0) + Number(line.quantity),
     );
   }
-  for (const [item, quantity] of required)
+
+  for (const [item, quantity] of required) {
     if (
       !Number.isFinite(quantity) ||
       quantity <= 0 ||
       (delivered.get(item) || 0) + 0.000001 < quantity
-    )
+    ) {
       throw error(
         'All order quantities must be dispatched before creating a full-order invoice',
       );
+    }
+  }
 }
+
 async function createInvoice(db, body, userId) {
   const tx = await db.transaction();
   try {
     const query = (sql, replacements = []) =>
       db.query(sql, { replacements, transaction: tx });
-    let soId = salesOrderId(body),
-      customerId = body.customer_id;
+    let soId = salesOrderId(body);
+    let customerId = body.customer_id;
+
     if (body.challan_id) {
       const [[challan]] = await query(
         'SELECT * FROM delivery_challans WHERE id=?',
@@ -91,22 +118,33 @@ async function createInvoice(db, body, userId) {
         !challan ||
         !['dispatched', 'delivered'].includes(challan.status) ||
         !challan.so_id
-      )
+      ) {
         throw error('A dispatched order-linked challan is required');
-      if (soId && soId !== challan.so_id)
+      }
+
+      if (soId && soId !== challan.so_id) {
         throw error('Challan belongs to another order');
+      }
+
       soId = challan.so_id;
     }
+
     let items = body.items;
+
     if (soId) {
       const [[order]] = await query(
         'SELECT * FROM sales_orders WHERE id=? FOR UPDATE',
         [soId],
       );
-      if (!order || ['draft', 'cancelled'].includes(order.status))
+
+      if (!order || ['draft', 'cancelled'].includes(order.status)) {
         throw error('An active confirmed sales order is required');
-      if (customerId && customerId !== order.customer_id)
+      }
+
+      if (customerId && customerId !== order.customer_id) {
         throw error('Customer does not own this order');
+      }
+
       customerId = order.customer_id;
       const [[existing]] = await query(
         'SELECT * FROM invoices WHERE so_id=? LIMIT 1',
@@ -126,15 +164,26 @@ async function createInvoice(db, body, userId) {
       );
       assertFullyDispatched(items, sent);
     }
-    if (!customerId) throw error('Customer is required');
+
+    if (!customerId) {
+      throw error('Customer is required');
+    }
+
     const [[customer]] = await query(
       'SELECT id,state FROM customers WHERE id=? FOR UPDATE',
       [customerId],
     );
-    if (!customer) throw error('Customer not found');
+
+    if (!customer) {
+      throw error('Customer not found');
+    }
+
     const key = soId ? `order:${soId}` : body.idempotency_key;
-    if (!key || key.length > 150)
+
+    if (!key || key.length > 150) {
       throw error('A stable Idempotency-Key is required for manual invoices');
+    }
+
     const fingerprint = createHash('sha256')
       .update(
         JSON.stringify({
@@ -152,22 +201,29 @@ async function createInvoice(db, body, userId) {
       [key],
     );
     if (existing) {
-      if (existing.customer_id !== customerId)
+      if (existing.customer_id !== customerId) {
         throw error('Idempotency key belongs to another customer');
-      if (!soId && existing.creation_hash !== fingerprint)
+      }
+
+      if (!soId && existing.creation_hash !== fingerprint) {
         throw error(
           'Idempotency key was already used for a different invoice payload',
         );
+      }
+
       await tx.commit();
       return { ...existing, already_created: true };
     }
+
     const [[company]] = await query(
       "SELECT setting_value FROM company_settings WHERE setting_key='state' LIMIT 1",
     );
-    if (!company?.setting_value || !customer.state)
+    if (!company?.setting_value || !customer.state) {
       throw error(
         'Company and customer states are required for tax calculation',
       );
+    }
+
     const priced = priceLines(
       items,
       String(company.setting_value).trim().toLowerCase() !==
@@ -177,12 +233,17 @@ async function createInvoice(db, body, userId) {
       const [[master]] = await query('SELECT id FROM item_master WHERE id=?', [
         item.item_id,
       ]);
-      if (!master) throw error('Invoice item does not exist');
+
+      if (!master) {
+        throw error('Invoice item does not exist');
+      }
     }
-    const id = uuid(),
-      number = body.invoice_number || `INV-${id}`;
+
+    const id = uuid();
+    const number = body.invoice_number || `INV-${id}`;
     const total =
       Math.round(priced.reduce((sum, line) => sum + line.total, 0) * 100) / 100;
+
     await query(
       "INSERT INTO invoices(id,invoice_number,so_id,customer_id,invoice_date,due_date,status,total_amount,balance_amount,creation_key,creation_hash) VALUES(?,?,?,?,COALESCE(?,CURDATE()),?,'draft',?,?,?,?)",
       [
@@ -198,7 +259,8 @@ async function createInvoice(db, body, userId) {
         fingerprint,
       ],
     );
-    for (const line of priced)
+
+    for (const line of priced) {
       await query(
         'INSERT INTO invoice_item_lines(id,invoice_id,item_id,description,quantity,rate,discount_percent,gst_rate,taxable,cgst,sgst,igst,total) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [
@@ -217,6 +279,8 @@ async function createInvoice(db, body, userId) {
           line.total,
         ],
       );
+    }
+
     await tx.commit();
     return {
       id,
@@ -231,6 +295,7 @@ async function createInvoice(db, body, userId) {
     throw cause;
   }
 }
+
 module.exports = {
   createInvoice,
   salesOrderId,

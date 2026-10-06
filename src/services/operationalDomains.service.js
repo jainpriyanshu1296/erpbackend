@@ -5,6 +5,7 @@ const {
   postVendorPaymentEffect,
   postBankEffect,
 } = require('./accounting.service');
+const { applyStockEffect } = require('./zeroGapClosure.service');
 
 const REPORTS = {
   receivables: {
@@ -88,19 +89,22 @@ function payrollSnapshot(
   };
 }
 function calculateGSTAuthoritative(items, orgState, customerState) {
-  if (!Array.isArray(items) || !items.length)
+  if (!Array.isArray(items) || !items.length) {
     throw error('At least one tax item is required');
+  }
   const lines = calculateGST(items, orgState, customerState);
   const totals = lines.reduce(
     (a, line) => {
-      for (const k of ['taxable', 'cgst', 'sgst', 'igst', 'total'])
+      for (const k of ['taxable', 'cgst', 'sgst', 'igst', 'total']) {
         a[k] += Number(line[k] || 0);
+      }
       return a;
     },
     { taxable: 0, cgst: 0, sgst: 0, igst: 0, total: 0 },
   );
-  for (const k of Object.keys(totals))
+  for (const k of Object.keys(totals)) {
     totals[k] = Math.round(totals[k] * 100) / 100;
+  }
   return {
     lines,
     totals,
@@ -111,8 +115,9 @@ function calculateGSTAuthoritative(items, orgState, customerState) {
   };
 }
 function integrationBoundary(type, sourceId, payload) {
-  if (!['einvoice', 'ewaybill'].includes(type))
+  if (!['einvoice', 'ewaybill'].includes(type)) {
     throw error('Unsupported government document type');
+  }
   return {
     document_type: type,
     source_id: sourceId,
@@ -122,7 +127,9 @@ function integrationBoundary(type, sourceId, payload) {
   };
 }
 function reportDefinition(key) {
-  if (!REPORTS[key]) throw error('Report is not available', 404);
+  if (!REPORTS[key]) {
+    throw error('Report is not available', 404);
+  }
   return REPORTS[key];
 }
 function range(params = {}) {
@@ -133,8 +140,9 @@ function range(params = {}) {
     !/^\d{4}-\d{2}-\d{2}$/.test(start) ||
     !/^\d{4}-\d{2}-\d{2}$/.test(end) ||
     start > end
-  )
+  ) {
     throw error('Invalid date range');
+  }
   return [start, end];
 }
 async function createNcr(req, body) {
@@ -143,10 +151,11 @@ async function createNcr(req, body) {
     !body.description ||
     !body.inspection_id ||
     !['minor', 'major', 'critical'].includes(body.severity || 'major')
-  )
+  ) {
     throw error(
       'inspection_id, ncr_number, description and valid severity are required',
     );
+  }
   const tx = await req.orgDb.transaction();
   try {
     const [[inspection]] = await req.orgDb.query(
@@ -157,8 +166,9 @@ async function createNcr(req, body) {
       !inspection ||
       !['processed', 'closed'].includes(inspection.status) ||
       Number(inspection.rejected_qty) <= 0
-    )
+    ) {
       throw error('NCR requires a processed inspection with rejected quantity');
+    }
     const [[existing]] = await req.orgDb.query(
       "SELECT id,status FROM quality_ncrs WHERE inspection_id=? AND status<>'rejected' ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
       { replacements: [body.inspection_id], transaction: tx },
@@ -210,7 +220,9 @@ async function finalizePayroll(req, runId) {
       'SELECT * FROM payroll_runs WHERE id=? FOR UPDATE',
       { replacements: [runId], transaction: tx },
     );
-    if (!run[0]) throw error('Payroll run not found', 404);
+    if (!run[0]) {
+      throw error('Payroll run not found', 404);
+    }
     if (
       run[0].status === 'processed' ||
       run[0].status === 'approved' ||
@@ -228,8 +240,9 @@ async function finalizePayroll(req, runId) {
         already_finalized: true,
       };
     }
-    if (run[0].status !== 'draft')
+    if (run[0].status !== 'draft') {
       throw error('Only draft payroll runs can be finalized', 409);
+    }
     const [items] = await req.orgDb.query(
       'SELECT * FROM payroll_items WHERE payroll_run_id=?',
       { replacements: [runId], transaction: tx },
@@ -256,7 +269,7 @@ async function finalizePayroll(req, runId) {
       );
       const statutory = payload.statutory_deductions || {};
       for (const [deductionType, amount] of Object.entries(statutory)) {
-        if (Number(amount) > 0)
+        if (Number(amount) > 0) {
           await req.orgDb.query(
             'INSERT INTO payroll_statutory_deductions(id,payroll_run_id,employee_id,deduction_type,amount,payload) VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE amount=VALUES(amount),payload=VALUES(payload)',
             {
@@ -271,6 +284,7 @@ async function finalizePayroll(req, runId) {
               transaction: tx,
             },
           );
+        }
       }
       await req.orgDb.query(
         'INSERT INTO payroll_payslips(id,payroll_run_id,employee_id,payslip_number,payload,gross_amount,deductions,net_amount) VALUES(?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE payload=VALUES(payload),gross_amount=VALUES(gross_amount),deductions=VALUES(deductions),net_amount=VALUES(net_amount)',
@@ -323,7 +337,9 @@ async function getPayslip(req, runId, employeeId) {
     'SELECT p.*,r.status run_status FROM payroll_payslips p JOIN payroll_runs r ON r.id=p.payroll_run_id WHERE p.payroll_run_id=? AND p.employee_id=?',
     { replacements: [runId, employeeId] },
   );
-  if (!rows[0]) throw error('Payslip not found', 404);
+  if (!rows[0]) {
+    throw error('Payslip not found', 404);
+  }
   return rows[0];
 }
 async function closePeriod(req, periodKey) {
@@ -333,7 +349,9 @@ async function closePeriod(req, periodKey) {
       'SELECT * FROM finance_periods WHERE period_key=? FOR UPDATE',
       { replacements: [periodKey], transaction: tx },
     );
-    if (!rows[0]) throw error('Finance period not found', 404);
+    if (!rows[0]) {
+      throw error('Finance period not found', 404);
+    }
     if (rows[0].status === 'closed') {
       await tx.commit();
       return rows[0];
@@ -356,9 +374,12 @@ async function reverseJournal(req, id) {
       'SELECT * FROM finance_journals WHERE id=? FOR UPDATE',
       { replacements: [id], transaction: tx },
     );
-    if (!rows[0]) throw error('Journal not found', 404);
-    if (rows[0].status !== 'posted')
+    if (!rows[0]) {
+      throw error('Journal not found', 404);
+    }
+    if (rows[0].status !== 'posted') {
       throw error('Only posted journals can be reversed', 409);
+    }
     const [existing] = await req.orgDb.query(
       'SELECT id FROM finance_journals WHERE journal_number=?',
       { replacements: [`REV-${rows[0].journal_number}`], transaction: tx },
@@ -392,7 +413,7 @@ async function reverseJournal(req, id) {
       'SELECT account_id,debit,credit FROM finance_journal_lines WHERE journal_id=?',
       { replacements: [id], transaction: tx },
     );
-    for (const line of lines)
+    for (const line of lines) {
       await req.orgDb.query(
         'INSERT INTO finance_journal_lines(id,journal_id,account_id,debit,credit) VALUES(?,?,?,?,?)',
         {
@@ -406,6 +427,7 @@ async function reverseJournal(req, id) {
           transaction: tx,
         },
       );
+    }
     await req.orgDb.query(
       'UPDATE finance_journals SET status="reversed" WHERE id=?',
       { replacements: [id], transaction: tx },
@@ -424,14 +446,17 @@ async function createFinanceDocument(req, body) {
     !body.document_date ||
     !Number.isFinite(Number(body.amount)) ||
     Number(body.amount) <= 0
-  )
+  ) {
     throw error('document_type, number, date and positive amount are required');
-  for (const field of ['taxable_amount', 'cgst', 'sgst', 'igst'])
+  }
+  for (const field of ['taxable_amount', 'cgst', 'sgst', 'igst']) {
     if (
       body[field] !== undefined &&
       (!Number.isFinite(Number(body[field])) || Number(body[field]) < 0)
-    )
+    ) {
       throw error(`Invalid ${field}`);
+    }
+  }
   const tx = await req.orgDb.transaction();
   try {
     if (body.document_type === 'payable') {
@@ -439,14 +464,19 @@ async function createFinanceDocument(req, body) {
         'SELECT id FROM vendors WHERE id=? AND is_active=1',
         { replacements: [body.party_id || null], transaction: tx },
       );
-      if (!vendor) throw error('Choose an active vendor');
+      if (!vendor) {
+        throw error('Choose an active vendor');
+      }
       const taxTotal =
         Number(body.taxable_amount ?? body.amount) +
         Number(body.cgst || 0) +
         Number(body.sgst || 0) +
         Number(body.igst || 0);
-      if (Math.round(taxTotal * 100) !== Math.round(Number(body.amount) * 100))
+      if (
+        Math.round(taxTotal * 100) !== Math.round(Number(body.amount) * 100)
+      ) {
         throw error('Taxable amount and taxes must equal the invoice total');
+      }
     }
     const id = uuid();
     await req.orgDb.query(
@@ -469,8 +499,9 @@ async function createFinanceDocument(req, body) {
         transaction: tx,
       },
     );
-    if (body.document_type === 'payable')
+    if (body.document_type === 'payable') {
       await postVendorInvoiceEffect(req.orgDb, id, req.user?.sub, tx);
+    }
     await tx.commit();
     return {
       id,
@@ -489,7 +520,9 @@ async function reconcileBank(req, id) {
       'SELECT * FROM bank_transactions WHERE id=? FOR UPDATE',
       { replacements: [id], transaction: tx },
     );
-    if (!rows[0]) throw error('Bank transaction not found', 404);
+    if (!rows[0]) {
+      throw error('Bank transaction not found', 404);
+    }
     if (rows[0].status === 'reconciled' && rows[0].journal_id) {
       await tx.commit();
       return { id, status: 'reconciled', already_reconciled: true };
@@ -528,10 +561,11 @@ async function createBankTransaction(req, body = {}) {
     !['receipt', 'payment', 'transfer_in', 'transfer_out'].includes(
       body.direction,
     )
-  )
+  ) {
     throw error(
       'transaction_date, positive amount and valid direction are required',
     );
+  }
   const tx = await req.orgDb.transaction();
   try {
     const id = uuid();
@@ -578,16 +612,18 @@ async function createBankTransaction(req, body = {}) {
 }
 
 async function transitionExpense(req, id, action) {
-  if (!['approve', 'reject', 'post'].includes(action))
+  if (!['approve', 'reject', 'post'].includes(action)) {
     throw error('Invalid expense action');
+  }
   const tx = await req.orgDb.transaction();
   try {
     const [docs] = await req.orgDb.query(
       'SELECT * FROM finance_documents WHERE id=? FOR UPDATE',
       { replacements: [id], transaction: tx },
     );
-    if (!docs[0] || docs[0].document_type !== 'expense')
+    if (!docs[0] || docs[0].document_type !== 'expense') {
       throw error('Expense not found', 404);
+    }
     const [states] = await req.orgDb.query(
       'SELECT * FROM expense_approvals WHERE document_id=? FOR UPDATE',
       { replacements: [id], transaction: tx },
@@ -621,8 +657,9 @@ async function transitionExpense(req, id, action) {
         { replacements: [id], transaction: tx },
       );
     } else {
-      if (!current || current.status !== 'approved')
+      if (!current || current.status !== 'approved') {
         throw error('Expense must be approved before posting', 409);
+      }
       const result = await postVendorPaymentEffect(
         req.orgDb,
         id,
@@ -655,8 +692,9 @@ async function recordVendorPayment(req, documentId, body = {}) {
   const tx = await req.orgDb.transaction();
   try {
     const key = req.get?.('Idempotency-Key') || body.idempotency_key;
-    if (!key || String(key).length > 120)
+    if (!key || String(key).length > 120) {
       throw error('A stable Idempotency-Key is required for vendor payment');
+    }
     const operationKey = `vendor-payment:${key}`;
     const [[existing]] = await req.orgDb.query(
       'SELECT result_json FROM operation_keys WHERE operation_key=? FOR UPDATE',
@@ -675,13 +713,15 @@ async function recordVendorPayment(req, documentId, body = {}) {
       'SELECT * FROM finance_documents WHERE id=? FOR UPDATE',
       { replacements: [documentId], transaction: tx },
     );
-    if (!docs[0] || docs[0].document_type !== 'payable')
+    if (!docs[0] || docs[0].document_type !== 'payable') {
       throw error('Payable document not found', 404);
+    }
     const amount = Number(body.amount || docs[0].amount);
     const paidAmount = Number(docs[0].paid_amount || 0);
     const outstanding = Number(docs[0].amount) - paidAmount;
-    if (!Number.isFinite(amount) || amount <= 0 || amount > outstanding)
+    if (!Number.isFinite(amount) || amount <= 0 || amount > outstanding) {
       throw error('Invalid payment amount');
+    }
     const paymentId = body.payment_id || uuid();
     const result = await postVendorPaymentEffect(
       req.orgDb,
@@ -722,17 +762,21 @@ async function recordVendorPayment(req, documentId, body = {}) {
 }
 
 function evaluateFormula(formula, values = {}) {
-  if (!formula) return 0;
+  if (!formula) {
+    return 0;
+  }
   const expression = String(formula).replace(
     /[A-Za-z_][A-Za-z0-9_]*/g,
     (name) => {
-      if (!Object.prototype.hasOwnProperty.call(values, name))
+      if (!Object.prototype.hasOwnProperty.call(values, name)) {
         throw error(`Unknown payroll formula variable: ${name}`);
+      }
       return Number(values[name]) || 0;
     },
   );
-  if (!/^[0-9+\-*/().\s]+$/.test(expression))
+  if (!/^[0-9+\-*/().\s]+$/.test(expression)) {
     throw error('Invalid payroll formula');
+  }
   // Formula input is restricted to numbers and arithmetic operators above.
   return (
     Math.round(Function(`"use strict"; return (${expression})`)() * 100) / 100
@@ -740,7 +784,9 @@ function evaluateFormula(formula, values = {}) {
 }
 
 async function savePayrollComponent(req, body) {
-  if (!body.code || !body.name) throw error('code and name are required');
+  if (!body.code || !body.name) {
+    throw error('code and name are required');
+  }
   const id = uuid();
   await req.orgDb.query(
     'INSERT INTO payroll_components(id,code,name,component_type,formula,taxable,statutory) VALUES(?,?,?,?,?,?,?)',
@@ -807,9 +853,12 @@ async function calculatePayroll(req, runId) {
       'SELECT * FROM payroll_runs WHERE id=? FOR UPDATE',
       { replacements: [runId], transaction: tx },
     );
-    if (!runs[0]) throw error('Payroll run not found', 404);
-    if (['approved', 'processed', 'paid', 'locked'].includes(runs[0].status))
+    if (!runs[0]) {
+      throw error('Payroll run not found', 404);
+    }
+    if (['approved', 'processed', 'paid', 'locked'].includes(runs[0].status)) {
       throw error('Payroll run is immutable', 409);
+    }
     const [employees] = await req.orgDb.query(
       'SELECT e.*,pa.id assignment_id,pa.annual_ctc,pa.components FROM employees e JOIN payroll_assignments pa ON pa.employee_id=e.id AND pa.effective_from=(SELECT MAX(p2.effective_from) FROM payroll_assignments p2 WHERE p2.employee_id=e.id AND p2.effective_from<=COALESCE(?,CURDATE())) WHERE e.status="active"',
       { replacements: [runs[0].period_end || null], transaction: tx },
@@ -853,16 +902,18 @@ async function calculatePayroll(req, runId) {
         const amount = formula
           ? evaluateFormula(formula, formulaValues)
           : Number(component.amount || 0);
-        if (amount < 0)
+        if (amount < 0) {
           throw error('Payroll component amount cannot be negative');
+        }
         payload.components[component.code] = amount;
         formulaValues[component.code] = amount;
-        if (component.component_type === 'earning')
+        if (component.component_type === 'earning') {
           payload.gross =
             Math.round((Number(payload.gross) + amount) * 100) / 100;
-        else
+        } else {
           payload.deductions =
             Math.round((Number(payload.deductions) + amount) * 100) / 100;
+        }
       }
       payload.net =
         Math.round((Number(payload.gross) - Number(payload.deductions)) * 100) /
@@ -878,11 +929,12 @@ async function calculatePayroll(req, runId) {
       };
       payload.gross = Math.round((payload.gross + overtime) * 100) / 100;
       payload.net = Math.round((payload.net + overtime) * 100) / 100;
-      if (payload.deductions > payload.gross)
+      if (payload.deductions > payload.gross) {
         throw Object.assign(
           new Error('Payroll deductions cannot exceed gross'),
           { status: 422, code: 'PAYROLL_BOUNDARY' },
         );
+      }
       total += payload.net;
       await req.orgDb.query(
         'INSERT INTO payroll_items(id,payroll_run_id,employee_id,gross_amount,deductions,net_amount) VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE gross_amount=VALUES(gross_amount),deductions=VALUES(deductions),net_amount=VALUES(net_amount)',
@@ -922,16 +974,21 @@ async function transitionPayroll(req, runId, transition) {
     approve: ['reviewed'],
     lock: ['approved'],
   };
-  if (!allowed[transition]) throw error('Invalid payroll transition');
+  if (!allowed[transition]) {
+    throw error('Invalid payroll transition');
+  }
   const tx = await req.orgDb.transaction();
   try {
     const [rows] = await req.orgDb.query(
       'SELECT * FROM payroll_runs WHERE id=? FOR UPDATE',
       { replacements: [runId], transaction: tx },
     );
-    if (!rows[0]) throw error('Payroll run not found', 404);
-    if (!allowed[transition].includes(rows[0].status))
+    if (!rows[0]) {
+      throw error('Payroll run not found', 404);
+    }
+    if (!allowed[transition].includes(rows[0].status)) {
       throw error(`Payroll run cannot be ${transition}d`, 409);
+    }
     const status = { review: 'reviewed', approve: 'approved', lock: 'locked' }[
       transition
     ];
@@ -971,21 +1028,26 @@ async function transitionPayroll(req, runId, transition) {
 }
 
 async function createAccount(req, body) {
-  if (!body.code || !body.name || !body.account_type)
+  if (!body.code || !body.name || !body.account_type) {
     throw error('code, name and account_type are required');
-  if (body.parent_id === body.id)
+  }
+  if (body.parent_id === body.id) {
     throw error('Account cannot be its own parent');
+  }
   if (body.parent_id) {
     const [p] = await req.orgDb.query(
       'SELECT id,parent_id FROM finance_accounts WHERE id=? AND is_active=1',
       { replacements: [body.parent_id] },
     );
-    if (!p[0]) throw error('Parent account not found', 404);
+    if (!p[0]) {
+      throw error('Parent account not found', 404);
+    }
     const visited = new Set();
     let parentId = body.parent_id;
     while (parentId) {
-      if (visited.has(parentId) || parentId === body.id)
+      if (visited.has(parentId) || parentId === body.id) {
         throw error('Account hierarchy contains a cycle', 409);
+      }
       visited.add(parentId);
       const [parents] = await req.orgDb.query(
         'SELECT parent_id FROM finance_accounts WHERE id=? AND is_active=1',
@@ -1018,29 +1080,35 @@ async function submitJournal(req, id, action) {
       'SELECT * FROM finance_journals WHERE id=? FOR UPDATE',
       { replacements: [id], transaction: tx },
     );
-    if (!rows[0]) throw error('Journal not found', 404);
+    if (!rows[0]) {
+      throw error('Journal not found', 404);
+    }
     const transitions = {
       submit: ['draft', 'submitted'],
       approve: ['submitted', 'approved'],
       post: ['approved', 'posted'],
     };
-    if (!transitions[action] || rows[0].status !== transitions[action][0])
+    if (!transitions[action] || rows[0].status !== transitions[action][0]) {
       throw error(`Journal cannot be ${action}d`, 409);
+    }
     if (action === 'post') {
       const [period] = await req.orgDb.query(
         'SELECT status FROM finance_periods WHERE ? BETWEEN starts_on AND ends_on FOR UPDATE',
         { replacements: [rows[0].journal_date], transaction: tx },
       );
-      if (!period[0])
+      if (!period[0]) {
         throw error('No accounting period exists for this journal date', 409);
-      if (period[0].status !== 'open')
+      }
+      if (period[0].status !== 'open') {
         throw error('Cannot post into a closed period', 409);
+      }
       const [sum] = await req.orgDb.query(
         'SELECT COALESCE(SUM(debit),0) debit,COALESCE(SUM(credit),0) credit FROM finance_journal_lines WHERE journal_id=?',
         { replacements: [id], transaction: tx },
       );
-      if (Number(sum[0].debit) !== Number(sum[0].credit))
+      if (Number(sum[0].debit) !== Number(sum[0].credit)) {
         throw error('Journal is not balanced', 409);
+      }
     }
     const next = transitions[action][1];
     const actor = req.user?.sub || null;
@@ -1093,8 +1161,9 @@ async function financialStatement(req, type, params = {}) {
     'receivables',
     'payables',
   ];
-  if (!statementTypes.includes(type))
+  if (!statementTypes.includes(type)) {
     throw error('Unsupported financial statement', 404);
+  }
   const [from, to] = range(params);
   const [rows] = await req.orgDb.query(
     'SELECT a.code,a.name,a.account_type,COALESCE(SUM(l.debit),0) debit,COALESCE(SUM(l.credit),0) credit FROM finance_accounts a LEFT JOIN (SELECT l.account_id,l.debit,l.credit FROM finance_journal_lines l INNER JOIN finance_journals j ON j.id=l.journal_id WHERE j.status="posted" AND j.journal_date BETWEEN ? AND ?) l ON l.account_id=a.id GROUP BY a.id ORDER BY a.code',
@@ -1159,8 +1228,9 @@ async function financialStatement(req, type, params = {}) {
 }
 
 async function gstSnapshot(req, body) {
-  if (!body.source_type || !body.source_id)
+  if (!body.source_type || !body.source_id) {
     throw error('source_type and source_id are required');
+  }
   const calculation = calculateGSTAuthoritative(
     body.items,
     body.org_state || req.org.state,
@@ -1231,9 +1301,12 @@ async function postPayrollToFinance(req, runId, body = {}) {
       'SELECT * FROM payroll_runs WHERE id=? FOR UPDATE',
       { replacements: [runId], transaction: tx },
     );
-    if (!runs[0]) throw error('Payroll run not found', 404);
-    if (!['approved', 'locked', 'processed'].includes(runs[0].status))
+    if (!runs[0]) {
+      throw error('Payroll run not found', 404);
+    }
+    if (!['approved', 'locked', 'processed'].includes(runs[0].status)) {
       throw error('Payroll must be approved before posting', 409);
+    }
     const [posted] = await req.orgDb.query(
       'SELECT id,journal_id FROM payroll_finance_posts WHERE payroll_run_id=?',
       { replacements: [runId], transaction: tx },
@@ -1262,8 +1335,9 @@ async function postPayrollToFinance(req, runId, body = {}) {
     const payable = accounts.find(
       (a) => a.code === (body.payable_account_code || 'SALARY_PAYABLE'),
     );
-    if (!expense || !payable)
+    if (!expense || !payable) {
       throw error('Payroll posting accounts are not configured', 409);
+    }
     const [sum] = await req.orgDb.query(
       'SELECT COALESCE(SUM(gross_amount),0) gross,COALESCE(SUM(net_amount),0) net FROM payroll_items WHERE payroll_run_id=?',
       { replacements: [runId], transaction: tx },
@@ -1347,7 +1421,9 @@ async function recordAudit(
   referenceId,
   changes = {},
 ) {
-  if (!req?.orgDb) return null;
+  if (!req?.orgDb) {
+    return null;
+  }
   await req.orgDb.query(
     'INSERT INTO activity_log(id,user_id,module,action,reference_type,reference_id,changes,ip_address) VALUES(?,?,?,?,?,?,?,?)',
     {
@@ -1366,14 +1442,883 @@ async function recordAudit(
   return true;
 }
 
+function jobWorkItems(items) {
+  if (!Array.isArray(items) || !items.length) {
+    throw error('At least one item is required');
+  }
+  const grouped = new Map();
+  for (const item of items) {
+    const quantity = Number(item.quantity);
+    if (!item.item_id || !Number.isFinite(quantity) || quantity <= 0) {
+      throw error('Each item requires an item_id and positive quantity');
+    }
+    grouped.set(item.item_id, (grouped.get(item.item_id) || 0) + quantity);
+  }
+  return [...grouped].map(([item_id, quantity]) => ({ item_id, quantity }));
+}
+
+async function jobWorkSettings(req) {
+  const [rows] = await req.orgDb.query(
+    "SELECT setting_key,setting_value FROM company_settings WHERE setting_key LIKE 'jobwork.%'",
+  );
+  return Object.fromEntries(
+    rows.map((row) => [row.setting_key.replace('jobwork.', ''), row.setting_value]),
+  );
+}
+
+async function issueJobWorkChallan(req, body = {}) {
+  const settings = await jobWorkSettings(req);
+  body = {
+    ...body,
+    warehouse_id: body.warehouse_id || settings.default_warehouse || null,
+  };
+  if (!body.job_work_order_id || !body.challan_number || !body.warehouse_id) {
+    throw error(
+      'job_work_order_id, challan_number and warehouse_id are required',
+    );
+  }
+  const items = jobWorkItems(body.items);
+  return withIdempotency(req, 'jobwork.challan.issue', async () => {
+    const tx = await req.orgDb.transaction();
+    try {
+      const [[order]] = await req.orgDb.query(
+        'SELECT * FROM job_work_orders WHERE id=? FOR UPDATE',
+        { replacements: [body.job_work_order_id], transaction: tx },
+      );
+      if (!order || !['approved', 'sent'].includes(order.status)) {
+        throw error('Job work order is not open for outward material', 409);
+      }
+      if (order.warehouse_id && order.warehouse_id !== body.warehouse_id) {
+        throw error('Outward warehouse must match the Job Work order', 409);
+      }
+      const [[warehouse]] = await req.orgDb.query(
+        'SELECT id FROM warehouses WHERE id=? AND is_active=1',
+        { replacements: [body.warehouse_id], transaction: tx },
+      );
+      if (!warehouse) throw error('Choose an active warehouse');
+      const challanId = uuid();
+      await req.orgDb.query(
+        'INSERT INTO job_work_challans(id,job_work_order_id,challan_number,warehouse_id,outward_date,notes,status,created_by) VALUES(?,?,?,?,?,?,?,?)',
+        {
+          replacements: [
+            challanId,
+            order.id,
+            body.challan_number,
+            body.warehouse_id,
+            body.outward_date || new Date().toISOString().slice(0, 10),
+            body.notes || null,
+            'posted',
+            req.user?.sub || null,
+          ],
+          transaction: tx,
+        },
+      );
+      for (const item of items) {
+        const [[master]] = await req.orgDb.query(
+          'SELECT id FROM item_master WHERE id=? AND is_active=1',
+          { replacements: [item.item_id], transaction: tx },
+        );
+        if (!master)
+          throw error('Job work item must be an active item master record');
+        if (order.item_id && order.item_id !== item.item_id) {
+          throw error('Outward material must match the job work order item');
+        }
+        if (order.item_id && Number(order.quantity || 0) > 0) {
+          const [[issued]] = await req.orgDb.query(
+            `SELECT COALESCE(SUM(ci.quantity),0) quantity
+             FROM job_work_challan_items ci
+             INNER JOIN job_work_challans c ON c.id=ci.challan_id
+             WHERE c.job_work_order_id=? AND c.status IN ('posted','completed') AND ci.item_id=?`,
+            { replacements: [order.id, item.item_id], transaction: tx },
+          );
+          if (Number(issued.quantity) + item.quantity > Number(order.quantity)) {
+            throw error('Outward quantity exceeds the job work order quantity', 409);
+          }
+        }
+        await req.orgDb.query(
+          'INSERT INTO job_work_challan_items(id,challan_id,item_id,quantity) VALUES(?,?,?,?)',
+          {
+            replacements: [uuid(), challanId, item.item_id, item.quantity],
+            transaction: tx,
+          },
+        );
+        await applyStockEffect(req.orgDb, {
+          operationKey: `jobwork:outward:${challanId}:${item.item_id}`,
+          referenceType: 'job_work_challan',
+          referenceId: challanId,
+          itemId: item.item_id,
+          warehouseId: body.warehouse_id,
+          quantity: item.quantity,
+          direction: 'out',
+          userId: req.user?.sub,
+          transaction: tx,
+        });
+      }
+      await req.orgDb.query(
+        'UPDATE job_work_orders SET status="sent" WHERE id=?',
+        { replacements: [order.id], transaction: tx },
+      );
+      await recordAudit(
+        req,
+        'jobwork',
+        'jobwork.challan.issue',
+        'job_work_challan',
+        challanId,
+        { job_work_order_id: order.id, items },
+      );
+      await tx.commit();
+      return { id: challanId, status: 'posted', items };
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  });
+}
+
+async function receiveJobWorkMaterial(req, body = {}) {
+  const settings = await jobWorkSettings(req);
+  body = {
+    ...body,
+    warehouse_id: body.warehouse_id || settings.default_warehouse || null,
+    requires_qc:
+      body.requires_qc === undefined
+        ? ['true', '1'].includes(String(settings.require_inward_qc))
+        : body.requires_qc,
+  };
+  if (!body.challan_id || !body.receipt_number || !body.warehouse_id) {
+    throw error('challan_id, receipt_number and warehouse_id are required');
+  }
+  const items = jobWorkItems(body.items);
+  const rate = Number(body.rate || 0);
+  if (!Number.isFinite(rate) || rate < 0) {
+    throw error('rate must be a non-negative number');
+  }
+  return withIdempotency(req, 'jobwork.receipt.post', async () => {
+    const tx = await req.orgDb.transaction();
+    try {
+      const [[challan]] = await req.orgDb.query(
+        'SELECT * FROM job_work_challans WHERE id=? FOR UPDATE',
+        { replacements: [body.challan_id], transaction: tx },
+      );
+      if (!challan || challan.status !== 'posted')
+        throw error('Only posted outward challans can be received', 409);
+      const [[warehouse]] = await req.orgDb.query(
+        'SELECT id FROM warehouses WHERE id=? AND is_active=1',
+        { replacements: [body.warehouse_id], transaction: tx },
+      );
+      if (!warehouse) {
+        throw error('Choose an active warehouse');
+      }
+      const receiptId = uuid();
+      await req.orgDb.query(
+        'INSERT INTO job_work_receipts(id,challan_id,receipt_number,warehouse_id,receipt_date,requires_qc,notes,status,created_by) VALUES(?,?,?,?,?,?,?,?,?)',
+        {
+          replacements: [
+            receiptId,
+            challan.id,
+            body.receipt_number,
+            body.warehouse_id,
+            body.receipt_date || new Date().toISOString().slice(0, 10),
+            body.requires_qc ? 1 : 0,
+            body.notes || null,
+            'posted',
+            req.user?.sub || null,
+          ],
+          transaction: tx,
+        },
+      );
+      for (const item of items) {
+        const [[issued]] = await req.orgDb.query(
+          'SELECT COALESCE(SUM(quantity),0) quantity FROM job_work_challan_items WHERE challan_id=? AND item_id=?',
+          { replacements: [challan.id, item.item_id], transaction: tx },
+        );
+        const [[received]] = await req.orgDb.query(
+          "SELECT COALESCE(SUM(ri.quantity),0) quantity FROM job_work_receipt_items ri JOIN job_work_receipts r ON r.id=ri.receipt_id WHERE r.challan_id=? AND ri.item_id=? AND r.status<>'cancelled' FOR UPDATE",
+          { replacements: [challan.id, item.item_id], transaction: tx },
+        );
+        const [[consumed]] = await req.orgDb.query(
+          "SELECT COALESCE(SUM(quantity),0) quantity FROM job_work_consumptions WHERE challan_id=? AND item_id=? AND status<>'cancelled' FOR UPDATE",
+          { replacements: [challan.id, item.item_id], transaction: tx },
+        );
+        if (
+          item.quantity + Number(received.quantity) + Number(consumed.quantity) >
+          Number(issued.quantity)
+        ) {
+          throw error(
+            'Receipt quantity exceeds pending material at job worker',
+            409,
+          );
+        }
+        await req.orgDb.query(
+          'INSERT INTO job_work_receipt_items(id,receipt_id,item_id,quantity,rate) VALUES(?,?,?,?,?)',
+          {
+            replacements: [
+              uuid(),
+              receiptId,
+              item.item_id,
+              item.quantity,
+              rate,
+            ],
+            transaction: tx,
+          },
+        );
+        await applyStockEffect(req.orgDb, {
+          operationKey: `jobwork:receipt:${receiptId}:${item.item_id}`,
+          referenceType: 'job_work_receipt',
+          referenceId: receiptId,
+          itemId: item.item_id,
+          warehouseId: body.warehouse_id,
+          quantity: item.quantity,
+          rate,
+          direction: 'in',
+          userId: req.user?.sub,
+          transaction: tx,
+        });
+        if (body.requires_qc) {
+          const inspectionId = uuid();
+          await req.orgDb.query(
+            'INSERT INTO qc_inspections(id,inspection_number,inspection_type,source_type,source_id,reference_id,item_id,inspected_qty,accepted_qty,rejected_qty,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,NOW())',
+            {
+              replacements: [
+                inspectionId,
+                `JW-QC-${receiptId.slice(0, 8)}-${item.item_id.slice(0, 6)}`,
+                'incoming',
+                'job_work_receipt',
+                receiptId,
+                receiptId,
+                item.item_id,
+                item.quantity,
+                0,
+                0,
+                'pending',
+              ],
+              transaction: tx,
+            },
+          );
+        }
+      }
+      const [[pending]] = await req.orgDb.query(
+        `SELECT COUNT(*) quantity
+         FROM job_work_challan_items ci
+         WHERE ci.challan_id=? AND ci.quantity > (
+           SELECT COALESCE(SUM(ri.quantity),0)
+           FROM job_work_receipt_items ri
+           INNER JOIN job_work_receipts r ON r.id=ri.receipt_id
+           WHERE r.challan_id=? AND ri.item_id=ci.item_id AND r.status<>'cancelled'
+         ) + (
+           SELECT COALESCE(SUM(jc.quantity),0)
+           FROM job_work_consumptions jc
+           WHERE jc.challan_id=? AND jc.item_id=ci.item_id AND jc.status<>'cancelled'
+         )`,
+        {
+          replacements: [challan.id, challan.id, challan.id],
+          transaction: tx,
+        },
+      );
+      if (!Number(pending.quantity)) {
+        await req.orgDb.query(
+          'UPDATE job_work_challans SET status="completed" WHERE id=?',
+          { replacements: [challan.id], transaction: tx },
+        );
+      }
+      await recordAudit(
+        req,
+        'jobwork',
+        'jobwork.receipt.post',
+        'job_work_receipt',
+        receiptId,
+        {
+          challan_id: challan.id,
+          items,
+          requires_qc: Boolean(body.requires_qc),
+        },
+      );
+      await tx.commit();
+      return { id: receiptId, status: 'posted', items };
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  });
+}
+
+async function recordJobWorkConsumption(req, body = {}) {
+  if (!body.challan_id || !body.item_id) {
+    throw error('challan_id and item_id are required');
+  }
+  const quantity = Number(body.quantity);
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    throw error('Consumption quantity must be positive');
+  }
+  return withIdempotency(req, 'jobwork.consumption.create', async () => {
+    const tx = await req.orgDb.transaction();
+    try {
+      const [[challan]] = await req.orgDb.query(
+        'SELECT id,status FROM job_work_challans WHERE id=? FOR UPDATE',
+        { replacements: [body.challan_id], transaction: tx },
+      );
+      if (!challan || !['posted', 'completed'].includes(challan.status)) {
+        throw error('Consumption requires a posted job work challan', 409);
+      }
+      const [[issued]] = await req.orgDb.query(
+        'SELECT COALESCE(SUM(quantity),0) quantity FROM job_work_challan_items WHERE challan_id=? AND item_id=?',
+        { replacements: [challan.id, body.item_id], transaction: tx },
+      );
+      const [[consumed]] = await req.orgDb.query(
+        "SELECT COALESCE(SUM(quantity),0) quantity FROM job_work_consumptions WHERE challan_id=? AND item_id=? AND status<>'cancelled' FOR UPDATE",
+        { replacements: [challan.id, body.item_id], transaction: tx },
+      );
+      const [[received]] = await req.orgDb.query(
+        "SELECT COALESCE(SUM(ri.quantity),0) quantity FROM job_work_receipt_items ri INNER JOIN job_work_receipts r ON r.id=ri.receipt_id WHERE r.challan_id=? AND ri.item_id=? AND r.status<>'cancelled' FOR UPDATE",
+        { replacements: [challan.id, body.item_id], transaction: tx },
+      );
+      if (
+        quantity + Number(consumed.quantity) + Number(received.quantity) >
+        Number(issued.quantity)
+      ) {
+        throw error('Consumption exceeds material issued to the job worker', 409);
+      }
+      const id = uuid();
+      await req.orgDb.query(
+        'INSERT INTO job_work_consumptions(id,challan_id,item_id,quantity,consumed_on,notes,created_by) VALUES(?,?,?,?,?,?,?)',
+        {
+          replacements: [
+            id,
+            challan.id,
+            body.item_id,
+            quantity,
+            body.consumed_on || new Date().toISOString().slice(0, 10),
+            body.notes || null,
+            req.user?.sub || null,
+          ],
+          transaction: tx,
+        },
+      );
+      const [[pending]] = await req.orgDb.query(
+        `SELECT COUNT(*) total FROM job_work_challan_items ci
+         WHERE ci.challan_id=? AND ci.quantity >
+           (SELECT COALESCE(SUM(ri.quantity),0) FROM job_work_receipt_items ri
+            INNER JOIN job_work_receipts r ON r.id=ri.receipt_id
+            WHERE r.challan_id=? AND ri.item_id=ci.item_id AND r.status<>'cancelled') +
+           (SELECT COALESCE(SUM(jc.quantity),0) FROM job_work_consumptions jc
+            WHERE jc.challan_id=? AND jc.item_id=ci.item_id AND jc.status<>'cancelled')`,
+        {
+          replacements: [challan.id, challan.id, challan.id],
+          transaction: tx,
+        },
+      );
+      if (!Number(pending.total)) {
+        await req.orgDb.query(
+          "UPDATE job_work_challans SET status='completed' WHERE id=?",
+          { replacements: [challan.id], transaction: tx },
+        );
+      }
+      await recordAudit(req, 'jobwork', 'jobwork.consumption.create', 'job_work_consumption', id, { challan_id: challan.id, item_id: body.item_id, quantity });
+      await tx.commit();
+      return { id, challan_id: challan.id, item_id: body.item_id, quantity };
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  });
+}
+
+async function receiveJobWorkFinishedGoods(req, body = {}) {
+  const settings = await jobWorkSettings(req);
+  body = {
+    ...body,
+    warehouse_id: body.warehouse_id || settings.default_warehouse || null,
+    requires_qc:
+      body.requires_qc === undefined
+        ? ['true', '1'].includes(String(settings.require_inward_qc))
+        : body.requires_qc,
+  };
+  if (!body.challan_id || !body.receipt_number || !body.item_id || !body.warehouse_id) {
+    throw error('challan_id, receipt_number, item_id and warehouse_id are required');
+  }
+  const quantity = Number(body.quantity);
+  const rate = Number(body.rate || 0);
+  if (
+    !Number.isFinite(quantity) ||
+    quantity <= 0 ||
+    !Number.isFinite(rate) ||
+    rate < 0
+  ) {
+    throw error('Finished goods quantity must be positive and rate non-negative');
+  }
+  return withIdempotency(req, 'jobwork.finished_goods.receive', async () => {
+    const tx = await req.orgDb.transaction();
+    try {
+      const [[challan]] = await req.orgDb.query(
+        `SELECT c.id,c.status,c.job_work_order_id,o.quantity order_quantity
+         FROM job_work_challans c
+         INNER JOIN job_work_orders o ON o.id=c.job_work_order_id
+         WHERE c.id=? FOR UPDATE`,
+        { replacements: [body.challan_id], transaction: tx },
+      );
+      if (!challan || !['posted', 'completed'].includes(challan.status)) {
+        throw error('Finished receipt requires a posted job work challan', 409);
+      }
+      const [[item]] = await req.orgDb.query('SELECT id FROM item_master WHERE id=? AND is_active=1', { replacements: [body.item_id], transaction: tx });
+      const [[warehouse]] = await req.orgDb.query('SELECT id FROM warehouses WHERE id=? AND is_active=1', { replacements: [body.warehouse_id], transaction: tx });
+      if (!item || !warehouse) throw error('Choose an active item and warehouse');
+      const [[received]] = await req.orgDb.query(
+        `SELECT COALESCE(SUM(f.quantity),0) quantity
+         FROM job_work_finished_goods_receipts f
+         INNER JOIN job_work_challans c ON c.id=f.challan_id
+         WHERE c.job_work_order_id=? AND f.status<>'cancelled' FOR UPDATE`,
+        { replacements: [challan.job_work_order_id], transaction: tx },
+      );
+      if (Number(received.quantity) + quantity > Number(challan.order_quantity)) {
+        throw error('Finished goods quantity exceeds the job work order quantity', 409);
+      }
+      const id = uuid();
+      await req.orgDb.query('INSERT INTO job_work_finished_goods_receipts(id,challan_id,receipt_number,item_id,warehouse_id,quantity,rate,receipt_date,requires_qc,status,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)', { replacements: [id, challan.id, body.receipt_number, body.item_id, body.warehouse_id, quantity, rate, body.receipt_date || new Date().toISOString().slice(0, 10), body.requires_qc ? 1 : 0, 'posted', req.user?.sub || null], transaction: tx });
+      await applyStockEffect(req.orgDb, { operationKey: `jobwork:finished:${id}:${body.item_id}`, referenceType: 'job_work_finished_goods_receipt', referenceId: id, itemId: body.item_id, warehouseId: body.warehouse_id, quantity, rate, direction: 'in', userId: req.user?.sub, transaction: tx });
+      if (body.requires_qc) {
+        const inspectionId = uuid();
+        await req.orgDb.query(
+          'INSERT INTO qc_inspections(id,inspection_number,inspection_type,source_type,source_id,reference_id,item_id,inspected_qty,accepted_qty,rejected_qty,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,NOW())',
+          {
+            replacements: [
+              inspectionId,
+              `JW-FG-QC-${id.slice(0, 8)}`,
+              'final',
+              'job_work_finished_goods_receipt',
+              id,
+              id,
+              body.item_id,
+              quantity,
+              0,
+              0,
+              'pending',
+            ],
+            transaction: tx,
+          },
+        );
+      }
+      await recordAudit(req, 'jobwork', 'jobwork.finished_goods.receive', 'job_work_finished_goods_receipt', id, { challan_id: challan.id, item_id: body.item_id, quantity });
+      await tx.commit();
+      return { id, status: 'posted' };
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  });
+}
+
+async function createJobWorkBill(req, body = {}) {
+  if (!body.job_work_order_id || !body.document_number || !body.document_date) {
+    throw error('job_work_order_id, document_number and document_date are required');
+  }
+  return withIdempotency(req, 'jobwork.bill.create', async () => {
+    const [[order]] = await req.orgDb.query(
+      'SELECT id,order_type,vendor_id,customer_id,status FROM job_work_orders WHERE id=? LIMIT 1',
+      { replacements: [body.job_work_order_id] },
+    );
+    if (!order || ['draft', 'cancelled'].includes(order.status)) {
+      throw error('Billing requires an approved Job Work order', 409);
+    }
+    const billType = body.bill_type || order.order_type;
+    if (!['vendor', 'customer'].includes(billType) || billType !== order.order_type) {
+      throw error('Bill type must match the Job Work order type');
+    }
+    const partyId = billType === 'customer' ? order.customer_id : order.vendor_id;
+    const partyTable = billType === 'customer' ? 'customers' : 'vendors';
+    const [[party]] = await req.orgDb.query(
+      `SELECT id FROM ${partyTable} WHERE id=? AND is_active=1`,
+      { replacements: [partyId] },
+    );
+    if (!party) {
+      throw error(`Choose an active ${billType}`);
+    }
+    const document = await createFinanceDocument(req, {
+      ...body,
+      party_id: partyId,
+      document_type: billType === 'customer' ? 'receivable' : 'payable',
+    });
+    await req.orgDb.query(
+      'INSERT INTO job_work_bills(id,job_work_order_id,finance_document_id,bill_type,created_by) VALUES(?,?,?,?,?)',
+      {
+        replacements: [
+          uuid(),
+          body.job_work_order_id,
+          document.id,
+          billType,
+          req.user?.sub || null,
+        ],
+      },
+    );
+    await recordAudit(
+      req,
+      'jobwork',
+      'jobwork.bill.create',
+      'finance_document',
+      document.id,
+      { job_work_order_id: body.job_work_order_id, bill_type: billType },
+    );
+    return document;
+  });
+}
+
+async function createJobWorkOrder(req, body = {}) {
+  const settings = await jobWorkSettings(req);
+  body = {
+    ...body,
+    warehouse_id: body.warehouse_id || settings.default_warehouse || null,
+  };
+  if (!body.expected_return_date && Number(settings.default_return_days) > 0) {
+    const expected = new Date();
+    expected.setDate(expected.getDate() + Number(settings.default_return_days));
+    body.expected_return_date = expected.toISOString().slice(0, 10);
+  }
+  const quantity = Number(body.quantity);
+  const rate = Number(body.rate || 0);
+  if (
+    !body.jw_number ||
+    !body.process_name ||
+    !body.item_id ||
+    !body.warehouse_id ||
+    !Number.isFinite(quantity) ||
+    quantity <= 0 ||
+    !Number.isFinite(rate) ||
+    rate < 0
+  ) {
+    throw error(
+      'jw_number, process_name, item_id, warehouse_id and positive quantity are required',
+    );
+  }
+  const orderType = body.order_type || 'vendor';
+  if (!['vendor', 'customer'].includes(orderType)) {
+    throw error('order_type must be vendor or customer');
+  }
+  if (
+    (orderType === 'vendor' && !body.vendor_id) ||
+    (orderType === 'customer' && !body.customer_id)
+  ) {
+    throw error(`A ${orderType} party is required`);
+  }
+  return withIdempotency(req, 'jobwork.order.create', async () => {
+    const tx = await req.orgDb.transaction();
+    try {
+      const partyTable = orderType === 'vendor' ? 'vendors' : 'customers';
+      const partyId = orderType === 'vendor' ? body.vendor_id : body.customer_id;
+      const [[party]] = await req.orgDb.query(
+        `SELECT id FROM ${partyTable} WHERE id=? AND is_active=1`,
+        { replacements: [partyId], transaction: tx },
+      );
+      const [[item]] = await req.orgDb.query(
+        'SELECT id FROM item_master WHERE id=? AND is_active=1',
+        { replacements: [body.item_id], transaction: tx },
+      );
+      const [[warehouse]] = await req.orgDb.query(
+        'SELECT id FROM warehouses WHERE id=? AND is_active=1',
+        { replacements: [body.warehouse_id], transaction: tx },
+      );
+      if (!party || !item || !warehouse) {
+        throw error('Choose an active party, item and warehouse');
+      }
+      const id = uuid();
+      await req.orgDb.query(
+        `INSERT INTO job_work_orders(
+          id,jw_number,order_type,vendor_id,customer_id,process_name,item_id,
+          warehouse_id,quantity,rate,status,expected_return_date,notes,created_by
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        {
+          replacements: [
+            id,
+            body.jw_number,
+            orderType,
+            body.vendor_id || null,
+            body.customer_id || null,
+            body.process_name,
+            body.item_id,
+            body.warehouse_id,
+            quantity,
+            rate,
+            'draft',
+            body.expected_return_date || null,
+            body.notes || null,
+            req.user?.sub || null,
+          ],
+          transaction: tx,
+        },
+      );
+      await tx.commit();
+      await recordAudit(req, 'jobwork', 'jobwork.order.create', 'job_work_order', id, body);
+      return { id, status: 'draft' };
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  });
+}
+
+async function updateJobWorkOrder(req, id, body = {}) {
+  const tx = await req.orgDb.transaction();
+  try {
+    const [[order]] = await req.orgDb.query(
+      'SELECT * FROM job_work_orders WHERE id=? FOR UPDATE',
+      { replacements: [id], transaction: tx },
+    );
+    if (!order) throw error('Job work order not found', 404);
+    if (order.status !== 'draft') {
+      throw error('Only draft job work orders can be edited', 409);
+    }
+    const allowed = [
+      'process_name',
+      'expected_return_date',
+      'notes',
+      'rate',
+    ];
+    const keys = Object.keys(body).filter((key) => allowed.includes(key));
+    if (!keys.length) throw error('No editable fields supplied');
+    if (
+      body.rate !== undefined &&
+      (!Number.isFinite(Number(body.rate)) || Number(body.rate) < 0)
+    ) {
+      throw error('rate must be a non-negative number');
+    }
+    await req.orgDb.query(
+      `UPDATE job_work_orders SET ${keys.map((key) => `${key}=?`).join(',')} WHERE id=?`,
+      {
+        replacements: [...keys.map((key) => body[key] ?? null), id],
+        transaction: tx,
+      },
+    );
+    await tx.commit();
+    await recordAudit(req, 'jobwork', 'jobwork.order.update', 'job_work_order', id, body);
+    return { id, status: order.status };
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  }
+}
+
+async function transitionJobWorkOrder(req, id, action) {
+  const tx = await req.orgDb.transaction();
+  try {
+    const [[order]] = await req.orgDb.query(
+      'SELECT * FROM job_work_orders WHERE id=? FOR UPDATE',
+      { replacements: [id], transaction: tx },
+    );
+    if (!order) throw error('Job work order not found', 404);
+    const transitions = {
+      submit: { from: ['draft'], to: 'approved' },
+      complete: { from: ['sent'], to: 'completed' },
+      cancel: { from: ['draft', 'approved'], to: 'cancelled' },
+    };
+    const transition = transitions[action];
+    if (!transition || !transition.from.includes(order.status)) {
+      throw error(`Job work order cannot be ${action}led from ${order.status}`, 409);
+    }
+    if (action === 'cancel') {
+      const [[effects]] = await req.orgDb.query(
+        "SELECT COUNT(*) total FROM job_work_challans WHERE job_work_order_id=? AND status IN ('posted','completed')",
+        { replacements: [id], transaction: tx },
+      );
+      if (Number(effects.total)) {
+        throw error('Cancel outward challans before cancelling the order', 409);
+      }
+    }
+    if (action === 'complete') {
+      const [[pending]] = await req.orgDb.query(
+        `SELECT COUNT(*) total FROM (
+          SELECT ci.id
+          FROM job_work_challans c
+          INNER JOIN job_work_challan_items ci ON ci.challan_id=c.id
+          LEFT JOIN (
+            SELECT r.challan_id,ri.item_id,SUM(ri.quantity) quantity
+            FROM job_work_receipts r
+            INNER JOIN job_work_receipt_items ri ON ri.receipt_id=r.id
+            WHERE r.status<>'cancelled' GROUP BY r.challan_id,ri.item_id
+          ) returned ON returned.challan_id=c.id AND returned.item_id=ci.item_id
+          LEFT JOIN (
+            SELECT challan_id,item_id,SUM(quantity) quantity
+            FROM job_work_consumptions WHERE status<>'cancelled'
+            GROUP BY challan_id,item_id
+          ) consumed ON consumed.challan_id=c.id AND consumed.item_id=ci.item_id
+          WHERE c.job_work_order_id=? AND c.status<>'cancelled'
+          GROUP BY ci.id,ci.quantity,returned.quantity,consumed.quantity
+          HAVING ci.quantity-COALESCE(returned.quantity,0)-COALESCE(consumed.quantity,0)>0
+        ) pending_material`,
+        { replacements: [id], transaction: tx },
+      );
+      if (Number(pending.total)) {
+        throw error('Resolve all pending material before completing the order', 409);
+      }
+    }
+    await req.orgDb.query('UPDATE job_work_orders SET status=? WHERE id=?', {
+      replacements: [transition.to, id],
+      transaction: tx,
+    });
+    await tx.commit();
+    await recordAudit(req, 'jobwork', `jobwork.order.${action}`, 'job_work_order', id, {
+      from: order.status,
+      to: transition.to,
+    });
+    return { id, status: transition.to };
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  }
+}
+
+async function cancelJobWorkStockDocument(req, kind, id) {
+  const definitions = {
+    challan: {
+      table: 'job_work_challans',
+      itemSql: 'SELECT item_id,quantity FROM job_work_challan_items WHERE challan_id=?',
+      referenceType: 'job_work_challan',
+      reverseDirection: 'in',
+      warehouseField: 'warehouse_id',
+    },
+    receipt: {
+      table: 'job_work_receipts',
+      itemSql: 'SELECT item_id,quantity,rate FROM job_work_receipt_items WHERE receipt_id=?',
+      referenceType: 'job_work_receipt',
+      reverseDirection: 'out',
+      warehouseField: 'warehouse_id',
+    },
+    finished: {
+      table: 'job_work_finished_goods_receipts',
+      itemSql: 'SELECT item_id,quantity,rate FROM job_work_finished_goods_receipts WHERE id=?',
+      referenceType: 'job_work_finished_goods_receipt',
+      reverseDirection: 'out',
+      warehouseField: 'warehouse_id',
+    },
+  };
+  const definition = definitions[kind];
+  if (!definition) throw error('Unsupported job work document');
+  const tx = await req.orgDb.transaction();
+  try {
+    const [[document]] = await req.orgDb.query(
+      `SELECT * FROM ${definition.table} WHERE id=? FOR UPDATE`,
+      { replacements: [id], transaction: tx },
+    );
+    if (!document) throw error('Job work document not found', 404);
+    if (document.status === 'cancelled') {
+      await tx.commit();
+      return { id, status: 'cancelled', already_cancelled: true };
+    }
+    if (!['posted', 'completed'].includes(document.status)) {
+      throw error('Only posted job work documents can be cancelled', 409);
+    }
+    if (kind === 'challan') {
+      const [[downstream]] = await req.orgDb.query(
+        `SELECT
+          (SELECT COUNT(*) FROM job_work_receipts WHERE challan_id=? AND status<>'cancelled') +
+          (SELECT COUNT(*) FROM job_work_consumptions WHERE challan_id=? AND status<>'cancelled') +
+          (SELECT COUNT(*) FROM job_work_finished_goods_receipts WHERE challan_id=? AND status<>'cancelled') total`,
+        { replacements: [id, id, id], transaction: tx },
+      );
+      if (Number(downstream.total)) {
+        throw error('Cancel downstream receipts and consumption first', 409);
+      }
+    }
+    if (kind === 'receipt' || kind === 'finished') {
+      const sourceType =
+        kind === 'receipt'
+          ? 'job_work_receipt'
+          : 'job_work_finished_goods_receipt';
+      const [[processedInspection]] = await req.orgDb.query(
+        "SELECT COUNT(*) total FROM qc_inspections WHERE source_type=? AND source_id=? AND status<>'pending' AND status<>'cancelled'",
+        { replacements: [sourceType, id], transaction: tx },
+      );
+      if (Number(processedInspection.total)) {
+        throw error('Processed Quality inspections must be reversed before cancellation', 409);
+      }
+      await req.orgDb.query(
+        "UPDATE qc_inspections SET status='cancelled' WHERE source_type=? AND source_id=? AND status='pending'",
+        { replacements: [sourceType, id], transaction: tx },
+      );
+    }
+    const [items] = await req.orgDb.query(definition.itemSql, {
+      replacements: [id],
+      transaction: tx,
+    });
+    for (const item of items) {
+      await applyStockEffect(req.orgDb, {
+        operationKey: `jobwork:cancel:${kind}:${id}:${item.item_id}`,
+        referenceType: `${definition.referenceType}_reversal`,
+        referenceId: id,
+        itemId: item.item_id,
+        warehouseId: document[definition.warehouseField],
+        quantity: item.quantity,
+        rate: Number(item.rate || 0),
+        direction: definition.reverseDirection,
+        userId: req.user?.sub,
+        transaction: tx,
+      });
+    }
+    await req.orgDb.query(
+      `UPDATE ${definition.table} SET status='cancelled',cancelled_by=?,cancelled_at=NOW() WHERE id=?`,
+      { replacements: [req.user?.sub || null, id], transaction: tx },
+    );
+    if (kind === 'challan') {
+      await req.orgDb.query(
+        "UPDATE job_work_orders SET status='approved' WHERE id=? AND status='sent'",
+        { replacements: [document.job_work_order_id], transaction: tx },
+      );
+    }
+    if (kind === 'receipt') {
+      await req.orgDb.query(
+        "UPDATE job_work_challans SET status='posted' WHERE id=? AND status='completed'",
+        { replacements: [document.challan_id], transaction: tx },
+      );
+    }
+    await tx.commit();
+    await recordAudit(req, 'jobwork', `jobwork.${kind}.cancel`, definition.referenceType, id);
+    return { id, status: 'cancelled' };
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  }
+}
+
+async function cancelJobWorkConsumption(req, id) {
+  const tx = await req.orgDb.transaction();
+  try {
+    const [[record]] = await req.orgDb.query(
+      'SELECT * FROM job_work_consumptions WHERE id=? FOR UPDATE',
+      { replacements: [id], transaction: tx },
+    );
+    if (!record) throw error('Job work consumption not found', 404);
+    if (record.status === 'cancelled') {
+      await tx.commit();
+      return { id, status: 'cancelled', already_cancelled: true };
+    }
+    await req.orgDb.query(
+      "UPDATE job_work_consumptions SET status='cancelled',cancelled_by=?,cancelled_at=NOW() WHERE id=?",
+      { replacements: [req.user?.sub || null, id], transaction: tx },
+    );
+    await req.orgDb.query(
+      "UPDATE job_work_challans SET status='posted' WHERE id=? AND status='completed'",
+      { replacements: [record.challan_id], transaction: tx },
+    );
+    await tx.commit();
+    await recordAudit(req, 'jobwork', 'jobwork.consumption.cancel', 'job_work_consumption', id);
+    return { id, status: 'cancelled' };
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  }
+}
+
 async function withIdempotency(req, operation, work) {
-  const key = req?.get ? req.get('Idempotency-Key') : null;
-  if (!key) return work();
+  const key = req?.get
+    ? req.get('Idempotency-Key') || req.body?.idempotency_key
+    : req.body?.idempotency_key;
+  if (!key) {
+    return work();
+  }
   const [rows] = await req.orgDb.query(
     'SELECT response_json FROM domain_idempotency WHERE idempotency_key=? AND operation=? LIMIT 1',
     { replacements: [key, operation] },
   );
-  if (rows[0]) return JSON.parse(rows[0].response_json);
+  if (rows[0]) {
+    return JSON.parse(rows[0].response_json);
+  }
   const result = await work();
   await req.orgDb.query(
     'INSERT INTO domain_idempotency(id,idempotency_key,operation,response_json) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE response_json=VALUES(response_json)',
@@ -1390,8 +2335,9 @@ async function withIdempotency(req, operation, work) {
 }
 
 async function createQualitySpecification(req, body = {}) {
-  if (!body.code || !body.name || !body.specification_type)
+  if (!body.code || !body.name || !body.specification_type) {
     throw error('code, name and specification_type are required');
+  }
   const id = require('uuid').v4();
   const record = {
     ...body,
@@ -1439,10 +2385,11 @@ async function createQualitySpecification(req, body = {}) {
 }
 
 async function createQualityParameter(req, body = {}) {
-  if (!body.specification_id || !body.parameter_code || !body.parameter_name)
+  if (!body.specification_id || !body.parameter_code || !body.parameter_name) {
     throw error(
       'specification_id, parameter_code and parameter_name are required',
     );
+  }
   const id = require('uuid').v4();
   const record = { ...body, id, is_active: body.is_active !== false ? 1 : 0 };
   const result = await withIdempotency(
@@ -1480,8 +2427,9 @@ async function createQualityParameter(req, body = {}) {
 }
 
 async function createQualitySamplingPlan(req, body = {}) {
-  if (!body.specification_id || !body.plan_code)
+  if (!body.specification_id || !body.plan_code) {
     throw error('specification_id and plan_code are required');
+  }
   const id = require('uuid').v4();
   const record = {
     ...body,
@@ -1522,10 +2470,11 @@ async function createQualitySamplingPlan(req, body = {}) {
 }
 
 async function createQualityAcceptanceCriteria(req, body = {}) {
-  if (!body.specification_id || !body.criterion_code || !body.criterion_name)
+  if (!body.specification_id || !body.criterion_code || !body.criterion_name) {
     throw error(
       'specification_id, criterion_code and criterion_name are required',
     );
+  }
   const id = require('uuid').v4();
   const record = { ...body, id, status: body.status || 'active' };
   const result = await withIdempotency(
@@ -1561,7 +2510,9 @@ async function createQualityAcceptanceCriteria(req, body = {}) {
 }
 
 async function createInspectionSnapshot(req, inspectionId, payload = {}) {
-  if (!inspectionId) throw error('inspection_id is required');
+  if (!inspectionId) {
+    throw error('inspection_id is required');
+  }
   const tx = await req.orgDb.transaction();
   try {
     const [rows] = await req.orgDb.query(
@@ -1614,7 +2565,9 @@ async function createInspectionSnapshot(req, inspectionId, payload = {}) {
 }
 
 async function createDepartment(req, body = {}) {
-  if (!body.code || !body.name) throw error('code and name are required');
+  if (!body.code || !body.name) {
+    throw error('code and name are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(
     req,
@@ -1663,8 +2616,9 @@ async function createHrMaster(req, kind, body = {}) {
     ],
   };
   const def = definitions[kind];
-  if (!def || !body.code || !body.name)
+  if (!def || !body.code || !body.name) {
     throw error('code and name are required');
+  }
   const id = uuid();
   return withIdempotency(req, `hr.${kind}.create`, async () => {
     const values =
@@ -1698,7 +2652,9 @@ async function createHrMaster(req, kind, body = {}) {
 }
 
 async function createLocation(req, body = {}) {
-  if (!body.code || !body.name) throw error('code and name are required');
+  if (!body.code || !body.name) {
+    throw error('code and name are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(req, 'hr.location.create', async () => {
     await req.orgDb.query(
@@ -1728,7 +2684,9 @@ async function createLocation(req, body = {}) {
 }
 
 async function createGrade(req, body = {}) {
-  if (!body.code || !body.name) throw error('code and name are required');
+  if (!body.code || !body.name) {
+    throw error('code and name are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(req, 'hr.grade.create', async () => {
     await req.orgDb.query(
@@ -1756,7 +2714,9 @@ async function createGrade(req, body = {}) {
 }
 
 async function createShift(req, body = {}) {
-  if (!body.code || !body.name) throw error('code and name are required');
+  if (!body.code || !body.name) {
+    throw error('code and name are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(req, 'hr.shift.create', async () => {
     await req.orgDb.query(
@@ -1788,7 +2748,9 @@ async function createShift(req, body = {}) {
 }
 
 async function createCalendar(req, body = {}) {
-  if (!body.code || !body.year) throw error('code and year are required');
+  if (!body.code || !body.year) {
+    throw error('code and year are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(req, 'hr.calendar.create', async () => {
     await req.orgDb.query(
@@ -1818,10 +2780,11 @@ async function createCalendar(req, body = {}) {
 }
 
 async function createAttendanceCorrection(req, body = {}) {
-  if (!body.employee_id || !body.attendance_date || !body.proposed_status)
+  if (!body.employee_id || !body.attendance_date || !body.proposed_status) {
     throw error(
       'employee_id, attendance_date and proposed_status are required',
     );
+  }
   const id = require('uuid').v4();
   const record = {
     ...body,
@@ -1865,8 +2828,9 @@ async function createAttendanceCorrection(req, body = {}) {
 }
 
 async function createHoliday(req, body = {}) {
-  if (!body.holiday_date || !body.holiday_name)
+  if (!body.holiday_date || !body.holiday_name) {
     throw error('holiday_date and holiday_name are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(req, 'hr.holiday.create', async () => {
     await req.orgDb.query(
@@ -1892,8 +2856,9 @@ async function createHoliday(req, body = {}) {
 }
 
 async function createEmployeeHistory(req, body = {}) {
-  if (!body.employee_id || !body.field_name || !body.effective_date)
+  if (!body.employee_id || !body.field_name || !body.effective_date) {
     throw error('employee_id, field_name and effective_date are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(
     req,
@@ -1935,13 +2900,17 @@ async function createEmployeeHistory(req, body = {}) {
 }
 
 async function getEmployee360(req, employeeId) {
-  if (!employeeId) throw error('employee_id is required');
+  if (!employeeId) {
+    throw error('employee_id is required');
+  }
   const [employeeRows] = await req.orgDb.query(
     'SELECT * FROM employees WHERE id=? LIMIT 1',
     { replacements: [employeeId] },
   );
   const employee = employeeRows[0];
-  if (!employee) throw error('Employee not found', 404);
+  if (!employee) {
+    throw error('Employee not found', 404);
+  }
   const [historyRows] = await req.orgDb.query(
     'SELECT * FROM employee_history WHERE employee_id=? ORDER BY created_at DESC LIMIT 50',
     { replacements: [employeeId] },
@@ -1982,7 +2951,7 @@ async function getEmployee360(req, employeeId) {
     'finance',
   ].includes(String(req.user?.role || '').toLowerCase());
   const safeEmployee = { ...employee };
-  if (!privileged)
+  if (!privileged) {
     for (const field of [
       'salary',
       'basic_salary',
@@ -1991,8 +2960,10 @@ async function getEmployee360(req, employeeId) {
       'pan',
       'aadhaar',
       'tax_id',
-    ])
+    ]) {
       delete safeEmployee[field];
+    }
+  }
   return {
     employee: safeEmployee,
     department: deptRows[0] || null,
@@ -2006,10 +2977,13 @@ async function getEmployee360(req, employeeId) {
 }
 
 async function approveAttendanceCorrection(req, id, body = {}) {
-  if (!id) throw error('attendance correction id is required');
+  if (!id) {
+    throw error('attendance correction id is required');
+  }
   const status = body.status || 'approved';
-  if (!['approved', 'rejected'].includes(status))
+  if (!['approved', 'rejected'].includes(status)) {
     throw error('status must be approved or rejected');
+  }
   const tx = await req.orgDb.transaction();
   try {
     const [rows] = await req.orgDb.query(
@@ -2017,7 +2991,9 @@ async function approveAttendanceCorrection(req, id, body = {}) {
       { replacements: [id], transaction: tx },
     );
     const row = rows[0];
-    if (!row) throw error('Attendance correction not found', 404);
+    if (!row) {
+      throw error('Attendance correction not found', 404);
+    }
     if (row.status !== 'pending') {
       await tx.commit();
       return { id, status: row.status, already_processed: true };
@@ -2069,8 +3045,9 @@ async function approveAttendanceCorrection(req, id, body = {}) {
 }
 
 async function createLeavePolicy(req, body = {}) {
-  if (!body.leave_type || !body.effective_from)
+  if (!body.leave_type || !body.effective_from) {
     throw error('leave_type and effective_from are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(
     req,
@@ -2112,8 +3089,9 @@ async function createLeavePolicy(req, body = {}) {
 }
 
 async function createLeaveAccrualRule(req, body = {}) {
-  if (!body.leave_type || !body.accrual_period || !body.effective_from)
+  if (!body.leave_type || !body.accrual_period || !body.effective_from) {
     throw error('leave_type, accrual_period and effective_from are required');
+  }
   const id = require('uuid').v4();
   const result = await withIdempotency(
     req,
@@ -2154,8 +3132,9 @@ async function createLeaveAccrualRule(req, body = {}) {
 
 async function approveLeaveRequest(req, id, body = {}) {
   const status = body.status || 'approved';
-  if (!['approved', 'rejected'].includes(status))
+  if (!['approved', 'rejected'].includes(status)) {
     throw error('status must be approved or rejected');
+  }
   const tx = await req.orgDb.transaction();
   try {
     const [rows] = await req.orgDb.query(
@@ -2163,7 +3142,9 @@ async function approveLeaveRequest(req, id, body = {}) {
       { replacements: [id], transaction: tx },
     );
     const leave = rows[0];
-    if (!leave) throw error('Leave request not found', 404);
+    if (!leave) {
+      throw error('Leave request not found', 404);
+    }
     if (leave.status !== 'pending') {
       await tx.commit();
       return { ...leave, already_processed: true };
@@ -2189,11 +3170,12 @@ async function approveLeaveRequest(req, id, body = {}) {
         },
       );
       const balance = Number(balanceRows[0]?.closing_balance || 0);
-      if (balance < days)
+      if (balance < days) {
         throw Object.assign(new Error('Leave balance is insufficient'), {
           status: 409,
           code: 'LEAVE_BALANCE_EXCEEDED',
         });
+      }
       await req.orgDb.query(
         'UPDATE leave_balances SET used_days=used_days+?,closing_balance=closing_balance-? WHERE id=?',
         { replacements: [days, days, balanceRows[0].id], transaction: tx },
@@ -2212,12 +3194,14 @@ async function approveLeaveRequest(req, id, body = {}) {
 }
 
 async function validateLeaveRequest(req, body = {}) {
-  if (!body.employee_id || !body.from_date || !body.to_date)
+  if (!body.employee_id || !body.from_date || !body.to_date) {
     throw error('employee_id, from_date and to_date are required');
+  }
   const from = new Date(body.from_date);
   const to = new Date(body.to_date);
-  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to < from)
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to < from) {
     throw error('Leave range is invalid');
+  }
   const [existing] = await req.orgDb.query(
     'SELECT id, employee_id, from_date, to_date, status FROM leave_requests WHERE employee_id=? AND status NOT IN ("rejected","cancelled") AND from_date <= ? AND to_date >= ?',
     { replacements: [body.employee_id, body.to_date, body.from_date] },
@@ -2241,8 +3225,9 @@ async function validateLeaveRequest(req, body = {}) {
   while (cursor <= to) {
     const iso = cursor.toISOString().slice(0, 10);
     const weekday = cursor.getDay();
-    if (weekday !== 0 && weekday !== 6 && !holidaySet.has(iso))
+    if (weekday !== 0 && weekday !== 6 && !holidaySet.has(iso)) {
       businessDays += 1;
+    }
     cursor.setDate(cursor.getDate() + 1);
   }
   const balance = await getLeaveBalanceForEmployee(
@@ -2293,10 +3278,11 @@ async function recordLeaveBalanceTransaction(req, body = {}) {
     !body.leave_type ||
     !body.transaction_type ||
     Number(body.quantity) === 0
-  )
+  ) {
     throw error(
       'employee_id, leave_type, transaction_type and quantity are required',
     );
+  }
   const tx = await req.orgDb.transaction();
   try {
     const [balances] = await req.orgDb.query(
@@ -2310,11 +3296,12 @@ async function recordLeaveBalanceTransaction(req, body = {}) {
     )
       ? current + delta
       : current - delta;
-    if (next < 0)
+    if (next < 0) {
       throw Object.assign(new Error('Leave balance cannot go negative'), {
         status: 409,
         code: 'LEAVE_BALANCE_INVALID',
       });
+    }
     const id = require('uuid').v4();
     await req.orgDb.query(
       'INSERT INTO leave_balance_transactions(id,employee_id,leave_type,transaction_type,quantity,related_reference,reason,created_by) VALUES(?,?,?,?,?,?,?,?)',
@@ -2397,8 +3384,9 @@ async function transitionNcr(req, id, body = {}) {
   if (
     !Object.prototype.hasOwnProperty.call(transitions, status) &&
     !Object.values(transitions).flat().includes(status)
-  )
+  ) {
     throw error('Invalid NCR status');
+  }
   const effectKey = `${id}:${status}:${body.root_cause || ''}:${body.corrective_action || ''}`;
   return withIdempotency(
     req,
@@ -2410,14 +3398,17 @@ async function transitionNcr(req, id, body = {}) {
           'SELECT * FROM quality_ncrs WHERE id=? FOR UPDATE',
           { replacements: [id], transaction: tx },
         );
-        if (!rows[0]) throw error('NCR not found', 404);
-        if (!transitions[rows[0].status]?.includes(status))
+        if (!rows[0]) {
+          throw error('NCR not found', 404);
+        }
+        if (!transitions[rows[0].status]?.includes(status)) {
           throw Object.assign(
             new Error(
               `NCR cannot transition from ${rows[0].status} to ${status}`,
             ),
             { status: 409, code: 'INVALID_NCR_TRANSITION' },
           );
+        }
         if (
           ['containment', 'corrective_action'].includes(status) &&
           !(
@@ -2426,10 +3417,12 @@ async function transitionNcr(req, id, body = {}) {
             body.corrective_action ||
             rows[0].corrective_action
           )
-        )
+        ) {
           throw error('Containment or corrective action details are required');
-        if (status === 'approved' && !(body.root_cause || rows[0].root_cause))
+        }
+        if (status === 'approved' && !(body.root_cause || rows[0].root_cause)) {
           throw error('Root cause is required before approval');
+        }
         if (
           status === 'verification' &&
           !(
@@ -2437,13 +3430,15 @@ async function transitionNcr(req, id, body = {}) {
             body.corrective_action ||
             rows[0].corrective_action
           )
-        )
+        ) {
           throw error('Verification evidence is required');
+        }
         if (
           status === 'closed' &&
           !(body.corrective_action || rows[0].corrective_action)
-        )
+        ) {
           throw error('Corrective action is required before closure');
+        }
         await req.orgDb.query(
           'UPDATE quality_ncrs SET status=?,root_cause=COALESCE(?,root_cause),containment_action=COALESCE(?,containment_action),corrective_action=COALESCE(?,corrective_action),verified_by=?,verified_at=?,closed_by=?,closed_at=? WHERE id=?',
           {
@@ -2504,18 +3499,20 @@ async function applyDispositionStockEffect(
   itemId = null,
 ) {
   const qty = Number(quantity || 0);
-  if (!inspectionId || !disposition || qty <= 0)
+  if (!inspectionId || !disposition || qty <= 0) {
     throw error(
       'inspection_id, disposition and positive quantity are required',
     );
+  }
   const [inspectionRows] = await req.orgDb.query(
     'SELECT * FROM qc_inspections WHERE id=? LIMIT 1',
     { replacements: [inspectionId], transaction: tx },
   );
   const inspection = inspectionRows[0] || {};
   const targetItemId = itemId || inspection.item_id || null;
-  if (!targetItemId)
+  if (!targetItemId) {
     throw error('Disposition cannot be applied without an item reference');
+  }
   if (inspection.inspection_type === 'incoming') {
     const [[legacy]] = await req.orgDb.query(
       "SELECT COUNT(*) count FROM stock_ledger WHERE reference_type='grn' AND reference_id=? AND item_id=? AND qty_in>0",
@@ -2529,22 +3526,25 @@ async function applyDispositionStockEffect(
     );
     // New Incoming QC credits accepted units only. Rejected units are not
     // available inventory, so their disposition must not remove accepted stock.
-    if (!Number(legacy.count))
+    if (!Number(legacy.count)) {
       return {
         item_id: targetItemId,
         warehouse_id: warehouseId,
         movement_type: 'none',
       };
+    }
   }
-  if (inspection.inspection_type === 'in_process')
+  if (inspection.inspection_type === 'in_process') {
     return {
       item_id: targetItemId,
       warehouse_id: warehouseId,
       movement_type: 'none',
     };
+  }
   const targetWarehouseId = warehouseId || null;
-  if (!targetWarehouseId)
+  if (!targetWarehouseId) {
     throw error('Warehouse is required for stocked-goods disposition');
+  }
   const movement = 'out';
   const [summaryRows] = await req.orgDb.query(
     'SELECT current_qty,avg_rate FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE',
@@ -2552,11 +3552,12 @@ async function applyDispositionStockEffect(
   );
   const currentQty = Number(summaryRows[0]?.current_qty || 0);
   const nextQty = movement === 'out' ? currentQty - qty : currentQty + qty;
-  if (movement === 'out' && nextQty < 0)
+  if (movement === 'out' && nextQty < 0) {
     throw Object.assign(
       new Error('Insufficient stock for disposition effect'),
       { status: 409, code: 'INSUFFICIENT_STOCK' },
     );
+  }
   await req.orgDb.query(
     'INSERT INTO stock_ledger(id,item_id,warehouse_id,transaction_type,reference_type,reference_id,qty_in,qty_out,balance_qty,notes,created_by,transaction_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,NOW())',
     {
@@ -2612,10 +3613,11 @@ async function disposeInspection(req, body) {
     !['quarantine', 'rework', 'scrap', 'return'].includes(body.disposition) ||
     !Number.isFinite(Number(body.quantity)) ||
     Number(body.quantity) <= 0
-  )
+  ) {
     throw error(
       'inspection_id, supported disposition and positive quantity are required',
     );
+  }
   const effectKey = `${body.inspection_id}:${body.disposition}:${body.quantity}:${body.batch_id || ''}:${body.serial_id || ''}`;
   return withIdempotency(req, `quality.disposition.${effectKey}`, async () => {
     const tx = await req.orgDb.transaction();
@@ -2633,23 +3635,28 @@ async function disposeInspection(req, body) {
         { replacements: [body.inspection_id], transaction: tx },
       );
       const inspection = inspectionRows[0];
-      if (!inspection) throw error('Inspection not found', 404);
-      if (inspection.status !== 'processed')
+      if (!inspection) {
+        throw error('Inspection not found', 404);
+      }
+      if (inspection.status !== 'processed') {
         throw error('Process inspection results before disposition', 409);
+      }
       const [[disposed]] = await req.orgDb.query(
         'SELECT COALESCE(SUM(quantity),0) quantity FROM quality_dispositions WHERE inspection_id=? FOR UPDATE',
         { replacements: [body.inspection_id], transaction: tx },
       );
       const disposedQty =
         Number(disposed?.quantity || 0) + Number(body.quantity);
-      if (disposedQty > Number(inspection.rejected_qty || 0))
+      if (disposedQty > Number(inspection.rejected_qty || 0)) {
         throw error('Disposition exceeds remaining rejected quantity');
+      }
       const nextStatus =
         disposedQty === Number(inspection.rejected_qty)
           ? 'closed'
           : 'processed';
-      if (body.item_id && body.item_id !== inspection.item_id)
+      if (body.item_id && body.item_id !== inspection.item_id) {
         throw error('Disposition item does not match inspection');
+      }
       let warehouseId = body.warehouse_id || null;
       if (!warehouseId) {
         const [[setting]] = await req.orgDb.query(
@@ -2787,4 +3794,15 @@ module.exports = {
   approveLeaveRequest,
   recordLeaveBalanceTransaction,
   transitionNcr,
+  issueJobWorkChallan,
+  receiveJobWorkMaterial,
+  recordJobWorkConsumption,
+  receiveJobWorkFinishedGoods,
+  createJobWorkBill,
+  createJobWorkOrder,
+  updateJobWorkOrder,
+  transitionJobWorkOrder,
+  cancelJobWorkStockDocument,
+  cancelJobWorkConsumption,
+  recordAudit,
 };

@@ -20,11 +20,13 @@ async function nextNumber(
       'INSERT INTO number_series(series_key,prefix,next_number,padding) VALUES(?,?,2,?)',
       { replacements: [key, prefix, padding], transaction },
     );
-  } else
+  } else {
     await db.query(
       'UPDATE number_series SET next_number=next_number+1 WHERE series_key=?',
       { replacements: [key], transaction },
     );
+  }
+
   return `${rows[0]?.prefix || prefix}${new Date().getFullYear()}-${String(n).padStart(Number(rows[0]?.padding || padding), '0')}`;
 }
 
@@ -40,10 +42,13 @@ async function postStockAdjustment(db, input, userId) {
       await tx.commit();
       return { id, status: 'posted', already_applied: true };
     }
-    if (existing && existing.status !== 'draft')
+
+    if (existing && existing.status !== 'draft') {
       throw Object.assign(new Error('Only draft adjustments can be posted'), {
         status: 409,
       });
+    }
+
     if (existing) {
       const [items] = await db.query(
         'SELECT * FROM stock_adjustment_items WHERE adjustment_id=? ORDER BY item_id,id',
@@ -51,21 +56,25 @@ async function postStockAdjustment(db, input, userId) {
       );
       input = { ...existing, items };
     }
+
     if (
       !input.warehouse_id ||
       !Array.isArray(input.items) ||
       !input.items.length ||
       !input.reason
-    )
+    ) {
       throw Object.assign(
         new Error('Warehouse, reason and adjustment items are required'),
         { status: 400 },
       );
+    }
+
     const number =
       existing?.adjustment_number ||
       input.adjustment_number ||
       (await nextNumber(db, 'stock_adjustment', 'ADJ-', 5, tx));
-    if (!existing)
+
+    if (!existing) {
       await db.query(
         'INSERT INTO stock_adjustments(id,adjustment_number,warehouse_id,reason,created_by,status) VALUES(?,?,?,?,?,?)',
         {
@@ -80,34 +89,44 @@ async function postStockAdjustment(db, input, userId) {
           transaction: tx,
         },
       );
+    }
+
     for (const item of input.items) {
       const qty = Number(item.quantity);
-      if (!item.item_id || !Number.isFinite(qty) || qty <= 0)
+
+      if (!item.item_id || !Number.isFinite(qty) || qty <= 0) {
         throw Object.assign(new Error('Invalid stock adjustment item'), {
           status: 400,
           code: 'VALIDATION_ERROR',
         });
+      }
+
       if (
         !['in', 'out', 'increase', 'decrease'].includes(item.direction) ||
         !Number.isFinite(Number(item.rate || 0)) ||
         Number(item.rate || 0) < 0
-      )
+      ) {
         throw Object.assign(new Error('Invalid direction or rate'), {
           status: 400,
         });
+      }
+
       const outgoing = ['out', 'decrease'].includes(item.direction);
-      const inQty = outgoing ? 0 : qty,
-        outQty = outgoing ? qty : 0;
+      const inQty = outgoing ? 0 : qty;
+      const outQty = outgoing ? qty : 0;
       const [summary] = await db.query(
         'SELECT current_qty,avg_rate FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE',
         { replacements: [item.item_id, input.warehouse_id], transaction: tx },
       );
       const current = Number(summary[0]?.current_qty || 0);
-      if (current - outQty < 0)
+
+      if (current - outQty < 0) {
         throw Object.assign(new Error('Insufficient stock'), {
           status: 409,
           code: 'INSUFFICIENT_STOCK',
         });
+      }
+
       const next = current + inQty - outQty;
       await db.query(
         'INSERT INTO stock_summary(item_id,warehouse_id,current_qty,avg_rate,total_value) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE current_qty=?, total_value=?',
@@ -175,22 +194,34 @@ async function recordInvoicePayment(db, invoiceId, amount, details, userId) {
       'SELECT total_amount,balance_amount,status FROM invoices WHERE id=? FOR UPDATE',
       { replacements: [invoiceId], transaction: tx },
     );
-    if (!rows.length || !Number.isFinite(Number(amount)) || Number(amount) <= 0)
+
+    if (
+      !rows.length ||
+      !Number.isFinite(Number(amount)) ||
+      Number(amount) <= 0
+    ) {
       throw Object.assign(new Error('Invoice or amount is invalid'), {
         status: 400,
         code: 'VALIDATION_ERROR',
       });
-    if (!['issued', 'part_paid'].includes(rows[0].status))
+    }
+
+    if (!['issued', 'part_paid'].includes(rows[0].status)) {
       throw Object.assign(
         new Error('Issue the invoice before recording payment'),
         { status: 409, code: 'INVALID_INVOICE_STATE' },
       );
+    }
+
     const balance = Number(rows[0].balance_amount ?? rows[0].total_amount);
-    if (Number(amount) > balance)
+
+    if (Number(amount) > balance) {
       throw Object.assign(new Error('Payment exceeds invoice balance'), {
         status: 409,
         code: 'OVERPAYMENT',
       });
+    }
+
     const paymentId = uuid();
     await db.query(
       'INSERT INTO invoice_payments(id,invoice_id,amount,method,reference,created_by) VALUES(?,?,?,?,?,?)',
@@ -226,7 +257,8 @@ async function recordInvoicePayment(db, invoiceId, amount, details, userId) {
       paid: Number(amount),
       balance_amount: next,
     };
-    if (operationKey)
+
+    if (operationKey) {
       await db.query(
         'INSERT INTO operation_keys(id,operation_key,result_json) VALUES(?,?,?)',
         {
@@ -234,6 +266,8 @@ async function recordInvoicePayment(db, invoiceId, amount, details, userId) {
           transaction: tx,
         },
       );
+    }
+
     await tx.commit();
     return result;
   } catch (e) {
@@ -266,6 +300,7 @@ function calculatePayroll(employee, attendance = {}, deductions = {}) {
     net: Math.round((gross - totalDeductions) * 100) / 100,
   };
 }
+
 function calculateMRP(demand, onHand, scheduled = 0, safetyStock = 0) {
   return Math.max(
     0,
@@ -275,6 +310,7 @@ function calculateMRP(demand, onHand, scheduled = 0, safetyStock = 0) {
       Number(scheduled || 0),
   );
 }
+
 module.exports = {
   nextNumber,
   postStockAdjustment,

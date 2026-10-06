@@ -65,8 +65,10 @@ test('GRN posting awaits Incoming QC without crediting stock and is idempotent',
 test('warehouse transfer receipt is idempotent', async () => {
   let received = false;
   let ledgerWrites = 0;
+  const effects = new Set();
+  const balances = { a: 10, b: 0 };
   const db = {
-    query: async (sql) => {
+    query: async (sql, options = {}) => {
       if (sql.startsWith('SELECT * FROM warehouse_transfers'))
         return [
           [
@@ -81,10 +83,39 @@ test('warehouse transfer receipt is idempotent', async () => {
       if (sql.startsWith('SELECT id FROM warehouse_transfer_receipts'))
         return [received ? [{ id: 'r-1' }] : []];
       if (sql.startsWith('SELECT * FROM warehouse_transfer_items'))
-        return [[{ item_id: 'i-1', quantity: 2, rate: 5 }]];
+        return [[{ id: 'line-1', item_id: 'i-1', quantity: 2, rate: 5 }]];
       if (sql.startsWith('SELECT current_qty,avg_rate FROM stock_summary'))
-        return [[{ current_qty: 10, avg_rate: 5 }]];
-      if (sql.startsWith('INSERT INTO stock_ledger')) ledgerWrites += 1;
+        return [[{ current_qty: balances.a, avg_rate: 5 }]];
+      if (sql.startsWith('SELECT id FROM stock_effects')) {
+        const operationKey = options.replacements[0];
+        return [effects.has(operationKey) ? [{ id: operationKey }] : []];
+      }
+      if (
+        sql.startsWith(
+          'SELECT current_qty,avg_rate,total_value FROM stock_summary',
+        )
+      ) {
+        const warehouseId = options.replacements[1];
+        return [
+          [
+            {
+              current_qty: balances[warehouseId],
+              avg_rate: 5,
+              total_value: balances[warehouseId] * 5,
+            },
+          ],
+        ];
+      }
+      if (sql.startsWith('INSERT INTO stock_summary')) {
+        const warehouseId = options.replacements[1];
+        balances[warehouseId] = options.replacements[2];
+      }
+      if (sql.startsWith('INSERT INTO stock_ledger')) {
+        ledgerWrites += 1;
+      }
+      if (sql.startsWith('INSERT INTO stock_effects')) {
+        effects.add(options.replacements[1]);
+      }
       if (sql.startsWith('INSERT INTO warehouse_transfer_receipts'))
         received = true;
       return [];
@@ -100,6 +131,8 @@ test('warehouse transfer receipt is idempotent', async () => {
     true,
   );
   assert.equal(ledgerWrites, 2);
+  assert.equal(effects.size, 2);
+  assert.deepEqual(balances, { a: 8, b: 2 });
 });
 
 test('reservation refuses to exceed available stock', async () => {

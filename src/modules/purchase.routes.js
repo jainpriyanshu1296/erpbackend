@@ -2,8 +2,37 @@ const express = require('express');
 const { v4: uuid } = require('uuid');
 const { ok, fail, created, asyncHandler } = require('../utils/response');
 const permission = require('../middleware/permission');
+const listQuery = require('../utils/listQuery');
 
 const router = express.Router();
+
+async function decideRequisition(req, next, allowed) {
+  return req.orgDb.transaction(async (transaction) => {
+    const [[pr]] = await req.orgDb.query(
+      'SELECT id,status FROM purchase_requisitions WHERE id=? FOR UPDATE',
+      { replacements: [req.params.id], transaction },
+    );
+    if (!pr) return { error: 'NOT_FOUND' };
+    if (!allowed.includes(pr.status)) return { error: 'INVALID_STATE' };
+    await req.orgDb.query(
+      'UPDATE purchase_requisitions SET status=?,rejection_reason=? WHERE id=?',
+      {
+        replacements: [next, next === 'rejected' ? req.body?.reason || null : null, req.params.id],
+        transaction,
+      },
+    );
+    await req.orgDb.query(
+      'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
+      {
+        replacements: [uuid(), req.user.sub, 'purchase', `purchase.requisition.${next}`,
+          'purchase_requisition', req.params.id,
+          JSON.stringify({ from: pr.status, to: next, reason: next === 'rejected' ? req.body?.reason || null : null })],
+        transaction,
+      },
+    );
+    return { id: req.params.id, status: next };
+  });
+}
 
 // ============ PURCHASE REQUISITIONS ============
 
@@ -11,11 +40,19 @@ router.get(
   '/requisitions',
   permission('purchase', 'can_view'),
   asyncHandler(async (req, res) => {
-    const page = Math.max(1, Number(req.query.page || 1));
-    const limit = Math.min(100, Number(req.query.limit || 20));
-    const search =
-      typeof req.query.search === 'string' ? req.query.search.trim() : '';
-    const status = req.query.status || '';
+    const { page, limit, offset, search, sort, direction } = listQuery(
+      req.query,
+      ['created_at', 'pr_number', 'status', 'required_date'],
+      'created_at',
+    );
+    const status = typeof req.query.status === 'string' ? req.query.status : '';
+    const sortColumn = {
+      created_at: 'pr.created_at',
+      pr_number: 'pr.pr_number',
+      status: 'pr.status',
+      required_date: 'pr.required_date',
+    }[sort];
+    const sortDirection = req.query.direction ? direction : 'DESC';
 
     let where = 'WHERE 1=1';
     const replacements = [];
@@ -40,10 +77,10 @@ router.get(
     FROM purchase_requisitions pr
     LEFT JOIN users u ON u.id = pr.requested_by
     ${where}
-    ORDER BY pr.created_at DESC
+    ORDER BY ${sortColumn} ${sortDirection}, pr.id DESC
     LIMIT ? OFFSET ?
   `,
-      { replacements: [...replacements, limit, (page - 1) * limit] },
+      { replacements: [...replacements, limit, offset] },
     );
 
     return ok(res, rows, 'Fetched successfully', {
@@ -78,7 +115,11 @@ router.post(
     }
 
     for (const item of items) {
-      if (!item.item_id || Number(item.quantity) <= 0) {
+      if (
+        !item.item_id ||
+        !Number.isFinite(Number(item.quantity)) ||
+        Number(item.quantity) <= 0
+      ) {
         return fail(
           res,
           400,
@@ -91,7 +132,19 @@ router.post(
     const tx = await req.orgDb.transaction();
     try {
       const prId = uuid();
-      const prNumber = `PR-${Date.now()}`;
+      const prNumber = `PR-${Date.now()}-${prId.slice(0, 8)}`;
+
+      const itemIds = [...new Set(items.map((item) => item.item_id))];
+      const [activeItems] = await req.orgDb.query(
+        `SELECT id FROM item_master WHERE id IN (${itemIds.map(() => '?').join(',')}) AND is_active=1`,
+        { replacements: itemIds, transaction: tx },
+      );
+      if (activeItems.length !== itemIds.length) {
+        throw Object.assign(new Error('Choose active Item Master records'), {
+          status: 400,
+          code: 'VALIDATION_ERROR',
+        });
+      }
 
       await req.orgDb.query(
         `
@@ -133,6 +186,23 @@ router.post(
         );
       }
 
+      await req.orgDb.query(
+        `INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload)
+         VALUES(?,?,?,?,?,?,?)`,
+        {
+          replacements: [
+            uuid(),
+            req.user.sub,
+            'purchase',
+            'purchase.requisition.create',
+            'purchase_requisition',
+            prId,
+            JSON.stringify({ pr_number: prNumber, item_count: items.length }),
+          ],
+          transaction: tx,
+        },
+      );
+
       await tx.commit();
       return created(res, { id: prId, pr_number: prNumber, status: 'draft' });
     } catch (error) {
@@ -156,7 +226,9 @@ router.get(
       { replacements: [req.params.id] },
     );
 
-    if (!pr.length) return fail(res, 404, 'NOT_FOUND', 'Requisition not found');
+    if (!pr.length) {
+      return fail(res, 404, 'NOT_FOUND', 'Requisition not found');
+    }
 
     const [items] = await req.orgDb.query(
       `
@@ -176,21 +248,6 @@ router.put(
   '/requisitions/:id',
   permission('purchase', 'can_edit'),
   asyncHandler(async (req, res) => {
-    const [pr] = await req.orgDb.query(
-      'SELECT status FROM purchase_requisitions WHERE id = ?',
-      { replacements: [req.params.id] },
-    );
-    if (!pr.length) return fail(res, 404, 'NOT_FOUND', 'Requisition not found');
-
-    if (pr[0].status !== 'draft') {
-      return fail(
-        res,
-        400,
-        'INVALID_STATE',
-        'Only draft requisitions can be edited',
-      );
-    }
-
     const allowed = [
       'department',
       'warehouse_id',
@@ -200,17 +257,36 @@ router.put(
       'notes',
     ];
     const keys = Object.keys(req.body).filter((k) => allowed.includes(k));
-
-    if (keys.length > 0) {
+    if (req.body.priority && !['low', 'normal', 'high', 'urgent'].includes(req.body.priority)) {
+      return fail(res, 400, 'VALIDATION_ERROR', 'Invalid priority');
+    }
+    const result = await req.orgDb.transaction(async (transaction) => {
+      const [[pr]] = await req.orgDb.query(
+        'SELECT id,status FROM purchase_requisitions WHERE id=? FOR UPDATE',
+        { replacements: [req.params.id], transaction },
+      );
+      if (!pr) return { error: 'NOT_FOUND' };
+      if (pr.status !== 'draft') return { error: 'INVALID_STATE' };
+      if (!keys.length) return { id: req.params.id };
       await req.orgDb.query(
         `UPDATE purchase_requisitions SET ${keys.map((k) => `${k}=?`).join(',')} WHERE id=?`,
         {
-          replacements: [...keys.map((k) => req.body[k]), req.params.id],
+          replacements: [...keys.map((k) =>
+            ['required_date', 'warehouse_id'].includes(k) && req.body[k] === '' ? null : req.body[k]
+          ), req.params.id],
+          transaction,
         },
       );
-    }
-
-    return ok(res, { id: req.params.id }, 'Requisition updated');
+      await req.orgDb.query(
+        'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
+        { replacements: [uuid(), req.user.sub, 'purchase', 'purchase.requisition.update',
+          'purchase_requisition', req.params.id, JSON.stringify({ fields: keys })], transaction },
+      );
+      return { id: req.params.id };
+    });
+    if (result.error) return fail(res, result.error === 'NOT_FOUND' ? 404 : 409,
+      result.error, result.error === 'NOT_FOUND' ? 'Requisition not found' : 'Only draft requisitions can be edited');
+    return ok(res, result, 'Requisition updated');
   }),
 );
 
@@ -218,33 +294,10 @@ router.post(
   '/requisitions/:id/approve',
   permission('purchase', 'can_approve'),
   asyncHandler(async (req, res) => {
-    const [pr] = await req.orgDb.query(
-      'SELECT status FROM purchase_requisitions WHERE id = ?',
-      { replacements: [req.params.id] },
-    );
-    if (!pr.length) return fail(res, 404, 'NOT_FOUND', 'Requisition not found');
-
-    if (pr[0].status !== 'submitted') {
-      return fail(
-        res,
-        400,
-        'INVALID_STATE',
-        'Only submitted requisitions can be approved',
-      );
-    }
-
-    await req.orgDb.query(
-      'UPDATE purchase_requisitions SET status = ? WHERE id = ?',
-      {
-        replacements: ['approved', req.params.id],
-      },
-    );
-
-    return ok(
-      res,
-      { id: req.params.id, status: 'approved' },
-      'Requisition approved',
-    );
+    const result = await decideRequisition(req, 'approved', ['submitted']);
+    if (result.error) return fail(res, result.error === 'NOT_FOUND' ? 404 : 409,
+      result.error, result.error === 'NOT_FOUND' ? 'Requisition not found' : 'Only submitted requisitions can be approved');
+    return ok(res, result, 'Requisition approved');
   }),
 );
 
@@ -252,33 +305,10 @@ router.post(
   '/requisitions/:id/reject',
   permission('purchase', 'can_approve'),
   asyncHandler(async (req, res) => {
-    const [pr] = await req.orgDb.query(
-      'SELECT status FROM purchase_requisitions WHERE id = ?',
-      { replacements: [req.params.id] },
-    );
-    if (!pr.length) return fail(res, 404, 'NOT_FOUND', 'Requisition not found');
-
-    if (!['submitted', 'approved'].includes(pr[0].status)) {
-      return fail(
-        res,
-        400,
-        'INVALID_STATE',
-        'Only submitted or approved requisitions can be rejected',
-      );
-    }
-
-    await req.orgDb.query(
-      'UPDATE purchase_requisitions SET status = ?, rejection_reason = ? WHERE id = ?',
-      {
-        replacements: ['rejected', req.body.reason || null, req.params.id],
-      },
-    );
-
-    return ok(
-      res,
-      { id: req.params.id, status: 'rejected' },
-      'Requisition rejected',
-    );
+    const result = await decideRequisition(req, 'rejected', ['submitted', 'approved']);
+    if (result.error) return fail(res, result.error === 'NOT_FOUND' ? 404 : 409,
+      result.error, result.error === 'NOT_FOUND' ? 'Requisition not found' : 'Only submitted or approved requisitions can be rejected');
+    return ok(res, result, 'Requisition rejected');
   }),
 );
 
@@ -288,11 +318,11 @@ router.get(
   '/orders',
   permission('purchase', 'can_view'),
   asyncHandler(async (req, res) => {
-    const page = Math.max(1, Number(req.query.page || 1));
-    const limit = Math.min(100, Number(req.query.limit || 20));
-    const search =
-      typeof req.query.search === 'string' ? req.query.search.trim() : '';
-    const status = req.query.status || '';
+    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
+      ['created_at', 'po_number', 'status', 'total_amount'], 'created_at');
+    const status = typeof req.query.status === 'string' ? req.query.status : '';
+    const sortColumn = { created_at: 'po.created_at', po_number: 'po.po_number',
+      status: 'po.status', total_amount: 'po.total_amount' }[sort];
 
     let where = 'WHERE 1=1';
     const replacements = [];
@@ -317,10 +347,10 @@ router.get(
     FROM purchase_orders po
     LEFT JOIN vendors v ON v.id = po.vendor_id
     ${where}
-    ORDER BY po.created_at DESC
+    ORDER BY ${sortColumn} ${req.query.direction ? direction : 'DESC'}, po.id DESC
     LIMIT ? OFFSET ?
   `,
-      { replacements: [...replacements, limit, (page - 1) * limit] },
+      { replacements: [...replacements, limit, offset] },
     );
 
     return ok(res, rows, 'Fetched successfully', {
@@ -344,8 +374,9 @@ router.post(
       notes,
     } = req.body;
 
-    if (!vendor_id)
+    if (!vendor_id) {
       return fail(res, 400, 'VALIDATION_ERROR', 'vendor_id is required');
+    }
     if (!items || !Array.isArray(items) || items.length === 0) {
       return fail(
         res,
@@ -374,8 +405,9 @@ router.post(
       'SELECT id FROM vendors WHERE id = ?',
       { replacements: [vendor_id] },
     );
-    if (!vendor.length)
+    if (!vendor.length) {
       return fail(res, 400, 'VALIDATION_ERROR', 'Vendor not found');
+    }
 
     const tx = await req.orgDb.transaction();
     try {
@@ -464,8 +496,9 @@ router.get(
       { replacements: [req.params.id] },
     );
 
-    if (!po.length)
+    if (!po.length) {
       return fail(res, 404, 'NOT_FOUND', 'Purchase order not found');
+    }
 
     const [items] = await req.orgDb.query(
       `
@@ -489,8 +522,9 @@ router.post(
       'SELECT status FROM purchase_orders WHERE id = ?',
       { replacements: [req.params.id] },
     );
-    if (!po.length)
+    if (!po.length) {
       return fail(res, 404, 'NOT_FOUND', 'Purchase order not found');
+    }
 
     if (!['draft', 'approved'].includes(po[0].status)) {
       return fail(
@@ -522,11 +556,11 @@ router.get(
   '/receipts',
   permission('purchase', 'can_view'),
   asyncHandler(async (req, res) => {
-    const page = Math.max(1, Number(req.query.page || 1));
-    const limit = Math.min(100, Number(req.query.limit || 20));
-    const search =
-      typeof req.query.search === 'string' ? req.query.search.trim() : '';
-    const status = req.query.status || '';
+    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
+      ['created_at', 'grn_number', 'status', 'received_date'], 'created_at');
+    const status = typeof req.query.status === 'string' ? req.query.status : '';
+    const sortColumn = { created_at: 'g.created_at', grn_number: 'g.grn_number',
+      status: 'g.status', received_date: 'g.received_date' }[sort];
 
     let where = 'WHERE 1=1';
     const replacements = [];
@@ -552,10 +586,10 @@ router.get(
     LEFT JOIN vendors v ON v.id = g.vendor_id
     LEFT JOIN purchase_orders po ON po.id = g.po_id
     ${where}
-    ORDER BY g.created_at DESC
+    ORDER BY ${sortColumn} ${req.query.direction ? direction : 'DESC'}, g.id DESC
     LIMIT ? OFFSET ?
   `,
-      { replacements: [...replacements, limit, (page - 1) * limit] },
+      { replacements: [...replacements, limit, offset] },
     );
 
     return ok(res, rows, 'Fetched successfully', {
@@ -573,8 +607,9 @@ router.post(
     const { po_id, vendor_id, items, warehouse_id, received_date, notes } =
       req.body;
 
-    if (!vendor_id)
+    if (!vendor_id) {
       return fail(res, 400, 'VALIDATION_ERROR', 'vendor_id is required');
+    }
     if (!items || !Array.isArray(items) || items.length === 0) {
       return fail(
         res,
@@ -611,11 +646,12 @@ router.post(
         'SELECT id FROM warehouses WHERE id=? AND is_active=1',
         { replacements: [warehouse_id || null], transaction: tx },
       );
-      if (!vendor || !warehouse)
+      if (!vendor || !warehouse) {
         throw Object.assign(
           new Error('Choose an active vendor and warehouse'),
           { status: 400, code: 'VALIDATION_ERROR' },
         );
+      }
       let orderLines = [];
       if (po_id) {
         const [[order]] = await req.orgDb.query(
@@ -627,13 +663,14 @@ router.post(
           order.vendor_id !== vendor_id ||
           order.warehouse_id !== warehouse_id ||
           !['approved', 'part_received'].includes(order.status)
-        )
+        ) {
           throw Object.assign(
             new Error(
               'Receipt must match an approved purchase order, vendor and warehouse',
             ),
             { status: 409, code: 'INVALID_RECEIPT' },
           );
+        }
         [orderLines] = await req.orgDb.query(
           'SELECT id,item_id,quantity FROM purchase_order_items WHERE order_id=?',
           { replacements: [po_id], transaction: tx },
@@ -667,13 +704,14 @@ router.post(
           const matches = orderLines.filter(
             (line) => line.item_id === item.item_id,
           );
-          if (matches.length !== 1)
+          if (matches.length !== 1) {
             throw Object.assign(
               new Error(
                 'Each receipt item must unambiguously match one purchase order line',
               ),
               { status: 409, code: 'INVALID_RECEIPT' },
             );
+          }
           poItemId = matches[0].id;
           const [[received]] = await req.orgDb.query(
             "SELECT COALESCE(SUM(gi.quantity),0) quantity FROM grn_items gi JOIN grn g ON g.id=gi.grn_id WHERE gi.po_item_id=? AND g.status<>'cancelled' FOR UPDATE",
@@ -682,11 +720,12 @@ router.post(
           if (
             Number(received.quantity) + Number(item.received_qty) >
             Number(matches[0].quantity)
-          )
+          ) {
             throw Object.assign(
               new Error('Receipt quantity exceeds the purchase order line'),
               { status: 409, code: 'INVALID_RECEIPT' },
             );
+          }
         }
         await req.orgDb.query(
           `
@@ -735,7 +774,9 @@ router.get(
       { replacements: [req.params.id] },
     );
 
-    if (!grn.length) return fail(res, 404, 'NOT_FOUND', 'GRN not found');
+    if (!grn.length) {
+      return fail(res, 404, 'NOT_FOUND', 'GRN not found');
+    }
 
     const [items] = await req.orgDb.query(
       `
@@ -761,13 +802,14 @@ router.post(
       req.user.sub,
       req.body,
     );
-    if (result.error)
+    if (result.error) {
       return fail(
         res,
         result.error === 'NOT_FOUND' ? 404 : 409,
         result.error,
         'Receipt cannot be posted',
       );
+    }
     return ok(
       res,
       result,
@@ -782,10 +824,11 @@ router.get(
   '/returns',
   permission('purchase', 'can_view'),
   asyncHandler(async (req, res) => {
-    const page = Math.max(1, Number(req.query.page || 1));
-    const limit = Math.min(100, Number(req.query.limit || 20));
-    const search =
-      typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
+      ['created_at', 'return_number', 'status'], 'created_at');
+    const status = typeof req.query.status === 'string' ? req.query.status : '';
+    const sortColumn = { created_at: 'pr.created_at', return_number: 'pr.return_number',
+      status: 'pr.status' }[sort];
 
     let where = 'WHERE 1=1';
     const replacements = [];
@@ -793,6 +836,10 @@ router.get(
     if (search) {
       where += ' AND (pr.return_number LIKE ? OR v.company_name LIKE ?)';
       replacements.push(`%${search}%`, `%${search}%`);
+    }
+    if (status) {
+      where += ' AND pr.status=?';
+      replacements.push(status);
     }
 
     const [[count]] = await req.orgDb.query(
@@ -806,10 +853,10 @@ router.get(
     FROM purchase_returns pr
     LEFT JOIN vendors v ON v.id = pr.vendor_id
     ${where}
-    ORDER BY pr.created_at DESC
+    ORDER BY ${sortColumn} ${req.query.direction ? direction : 'DESC'}, pr.id DESC
     LIMIT ? OFFSET ?
   `,
-      { replacements: [...replacements, limit, (page - 1) * limit] },
+      { replacements: [...replacements, limit, offset] },
     );
 
     return ok(res, rows, 'Fetched successfully', {
@@ -826,13 +873,14 @@ router.post(
   asyncHandler(async (req, res) => {
     const { vendor_id, grn_id, items, warehouse_id, reason, notes } = req.body;
 
-    if (!vendor_id || !grn_id)
+    if (!vendor_id || !grn_id) {
       return fail(
         res,
         400,
         'VALIDATION_ERROR',
         'vendor_id and grn_id are required',
       );
+    }
     if (!items || !Array.isArray(items) || items.length === 0) {
       return fail(
         res,
@@ -867,11 +915,12 @@ router.post(
         'SELECT id FROM warehouses WHERE id=? AND is_active=1',
         { replacements: [warehouse_id || null], transaction: tx },
       );
-      if (!vendor || !warehouse)
+      if (!vendor || !warehouse) {
         throw Object.assign(
           new Error('Choose an active vendor and warehouse'),
           { status: 400, code: 'VALIDATION_ERROR' },
         );
+      }
       if (grn_id) {
         const [[grn]] = await req.orgDb.query(
           "SELECT id,vendor_id,warehouse_id FROM grn WHERE id=? AND status='posted' FOR UPDATE",
@@ -881,13 +930,14 @@ router.post(
           !grn ||
           grn.vendor_id !== vendor_id ||
           grn.warehouse_id !== warehouse_id
-        )
+        ) {
           throw Object.assign(
             new Error(
               'Return must match a posted receipt, vendor and warehouse',
             ),
             { status: 409, code: 'INVALID_RETURN' },
           );
+        }
         const requested =
           require('../utils/workflowValidation').aggregateItemQuantities(
             items,
@@ -902,11 +952,15 @@ router.post(
             "SELECT COALESCE(SUM(pri.quantity),0) quantity FROM purchase_return_items pri JOIN purchase_returns pr ON pr.id=pri.return_id WHERE pr.grn_id=? AND pri.item_id=? AND pr.status<>'cancelled' FOR UPDATE",
             { replacements: [grn_id, itemId], transaction: tx },
           );
-          if (Number(returned.quantity) + returnQty > Number(accepted.quantity))
+          if (
+            Number(returned.quantity) + returnQty >
+            Number(accepted.quantity)
+          ) {
             throw Object.assign(
               new Error('Return quantity exceeds QC-accepted receipt quantity'),
               { status: 409, code: 'INVALID_RETURN' },
             );
+          }
         }
       }
       const returnId = uuid();
@@ -1005,25 +1059,27 @@ router.post(
         { replacements: [req.params.id], transaction: tx },
       );
 
-      if (!items.length)
+      if (!items.length) {
         throw Object.assign(new Error('Return requires items'), {
           status: 400,
           code: 'VALIDATION_ERROR',
         });
+      }
       let total = 0;
       for (const item of items) {
-        const qty = Number(item.quantity),
-          rate = Number(item.rate || 0);
+        const qty = Number(item.quantity);
+        const rate = Number(item.rate || 0);
         if (
           !Number.isFinite(qty) ||
           qty <= 0 ||
           !Number.isFinite(rate) ||
           rate < 0
-        )
+        ) {
           throw Object.assign(new Error('Invalid return quantity or rate'), {
             status: 400,
             code: 'VALIDATION_ERROR',
           });
+        }
         total += qty * rate;
         await require('../services/zeroGapClosure.service').applyStockEffect(
           req.orgDb,

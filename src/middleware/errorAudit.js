@@ -3,7 +3,11 @@ const { v4: uuid } = require('uuid');
 
 function logApiError(req, res, error) {
   const status = error?.status || res.statusCode;
-  if (!status || status < 400) return;
+
+  if (!status || status < 400) {
+    return;
+  }
+
   const payload = {
     id: uuid(),
     request_id: req.requestId || null,
@@ -26,7 +30,9 @@ function logApiError(req, res, error) {
     ip_address: req.ip || null,
     user_agent: req.get('user-agent') || null,
   };
+
   console.error(JSON.stringify({ type: 'api_error', ...payload }));
+
   masterDb
     .query(
       `INSERT INTO api_error_logs

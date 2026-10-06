@@ -4,7 +4,10 @@
  */
 
 function escapeXml(unsafe) {
-  if (unsafe == null) return '';
+  if (unsafe == null) {
+    return '';
+  }
+
   return String(unsafe)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -14,7 +17,10 @@ function escapeXml(unsafe) {
 }
 
 function formatTallyDate(dateStr) {
-  if (!dateStr) return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  if (!dateStr) {
+    return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  }
+
   const d = new Date(dateStr);
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
