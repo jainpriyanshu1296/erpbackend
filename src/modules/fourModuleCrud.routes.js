@@ -64,6 +64,20 @@ router.get(
     ok(res, await service.detail(req, req.query.endpoint, req.query.id)),
   ),
 );
+// GRN navigation and legacy receipts use the same validated receipt workflow.
+for (const path of ['/purchase/grn', '/purchase/grn/:id/post'])
+  router.post(
+    path,
+    ...secure('purchase', path.endsWith('/post') ? 'can_edit' : 'can_create'),
+    (req, res, next) => {
+      const previous = req.url;
+      req.url = previous.replace('/purchase/grn', '/receipts');
+      require('./purchase.routes').handle(req, res, (error) => {
+        req.url = previous;
+        next(error);
+      });
+    },
+  );
 // Canonical aliases retain the established stock-aware closure creators.
 for (const [endpoint, target] of Object.entries({
   '/inventory/batches': '/closure/batches',
@@ -141,7 +155,7 @@ for (const endpoint of [...Object.keys(resources), ...Object.keys(aliases)]) {
       }),
     );
   // Keep existing validated creators and workflow action routes in control.
-  if (endpoint === '/production/job-cards')
+  if (def.create)
     router.post(
       endpoint,
       ...secure(def.module, 'can_create'),

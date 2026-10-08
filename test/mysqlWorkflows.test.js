@@ -106,7 +106,12 @@ test(
                   json: JSON.parse(text),
                 });
               } catch (error) {
-                reject(error);
+                reject(
+                  new Error(
+                    `${method} ${path}: HTTP ${response.statusCode}: ${text.slice(0, 500)}`,
+                    { cause: error },
+                  ),
+                );
               }
             });
           },
@@ -407,6 +412,115 @@ test(
         });
         await stock('flow-rm', 'flow-wh', 4, 20);
         await stock('flow-fg', 'flow-wh', 2, 20);
+      },
+    );
+    await t.test(
+      'Inventory master, tracking and draft-document CRUD run against migrated MySQL',
+      async () => {
+        await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
+        for (const [endpoint, body, patch] of [
+          [
+            '/inventory/uom',
+            { uom_code: 'CRUD', uom_name: 'CRUD unit' },
+            { uom_name: 'Revised unit' },
+          ],
+          [
+            '/inventory/warehouses',
+            { warehouse_code: 'CRUD', warehouse_name: 'CRUD warehouse' },
+            { warehouse_name: 'Revised warehouse' },
+          ],
+          [
+            '/inventory/items',
+            { item_code: 'CRUD', item_name: 'CRUD item' },
+            { item_name: 'Revised item' },
+          ],
+          [
+            '/inventory/locations',
+            { warehouse_id: 'wh', code: 'CRUD', name: 'CRUD location' },
+            { name: 'Revised location' },
+          ],
+        ]) {
+          const record = await call('POST', endpoint, body, 201);
+          await call('GET', `${endpoint}/${record.id}`);
+          await call('PUT', `${endpoint}/${record.id}`, patch);
+          await call('PATCH', `${endpoint}/${record.id}`, patch);
+          await call('DELETE', `${endpoint}/${record.id}`);
+          const inactive = await call('GET', `${endpoint}/${record.id}`);
+          assert.equal(Number(inactive.is_active), 0);
+        }
+        for (const [endpoint, body, patch] of [
+          [
+            '/inventory/batches',
+            { item_id: 'rm', warehouse_id: 'wh', batch_no: 'CRUD-B' },
+            { batch_no: 'CRUD-B2' },
+          ],
+          [
+            '/inventory/serials',
+            { item_id: 'rm', warehouse_id: 'wh', serial_no: 'CRUD-S' },
+            { serial_no: 'CRUD-S2' },
+          ],
+          [
+            '/inventory/gate-pass',
+            {
+              pass_number: 'CRUD-G',
+              pass_type: 'inward',
+              item_id: 'rm',
+              warehouse_id: 'wh',
+              quantity: 1,
+            },
+            { quantity: 2 },
+          ],
+        ]) {
+          const record = await call('POST', endpoint, body, 201);
+          await call('GET', `${endpoint}/${record.id}`);
+          await call('PUT', `${endpoint}/${record.id}`, patch);
+          await call('PATCH', `${endpoint}/${record.id}`, patch);
+          await call('DELETE', `${endpoint}/${record.id}`);
+          await call('GET', `${endpoint}/${record.id}`, undefined, 404);
+        }
+        await call(
+          'POST',
+          '/inventory/gate-pass',
+          {
+            pass_number: 'INVALID',
+            pass_type: 'bad',
+            item_id: 'rm',
+            warehouse_id: 'wh',
+            quantity: 1,
+          },
+          400,
+        );
+        const count = await call(
+          'POST',
+          '/inventory/counts',
+          { count_number: 'CRUD-C', warehouse_id: 'wh' },
+          201,
+        );
+        const line = await call(
+          'POST',
+          `/inventory/counts/${count.id}/items`,
+          { item_id: 'rm', counted_qty: 100 },
+          201,
+        );
+        await call('PATCH', `/inventory/counts/${count.id}/items/${line.id}`, {
+          counted_qty: 99,
+        });
+        await call('DELETE', `/inventory/counts/${count.id}`);
+        const pr = await call(
+          'POST',
+          '/purchase/requisitions',
+          { warehouse_id: 'wh', items: [{ item_id: 'rm', quantity: 1 }] },
+          201,
+        );
+        await call('POST', `/purchase/requisitions/${pr.id}/items`, {
+          items: [{ item_id: 'rm', quantity: 2, rate: 5 }],
+        });
+        await call('PATCH', `/purchase/requisitions/${pr.id}`, {
+          notes: 'Revised',
+        });
+        const detail = await call('GET', `/purchase/requisitions/${pr.id}`);
+        assert.equal(Number(detail.items[0].quantity), 2);
+        await call('DELETE', `/purchase/requisitions/${pr.id}`);
       },
     );
     await t.test(

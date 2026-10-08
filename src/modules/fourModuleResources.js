@@ -262,7 +262,7 @@ const resources = {
     'gate_pass',
     ['pass_number', 'pass_type', 'item_id', 'warehouse_id', 'quantity'],
     ['pass_number', 'pass_type', 'item_id', 'warehouse_id', 'quantity'],
-    { states: ['open'], initial: 'open' },
+    { states: ['open'], initial: 'open', create: true },
   ),
   '/inventory/batches': document(
     'inventory',
