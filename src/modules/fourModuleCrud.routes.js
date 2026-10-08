@@ -13,7 +13,9 @@ const secure = (module, action) => [
   orgContext,
   entitlement,
   moduleGuard(module),
-  permission(module, action),
+  typeof action === 'function'
+    ? (req, res, next) => permission(module, action(req))(req, res, next)
+    : permission(module, action),
 ];
 const resourceAccess = (action) => (req, res, next) => {
   let def;
@@ -200,12 +202,20 @@ for (const endpoint of [...Object.keys(resources), ...Object.keys(aliases)]) {
         ...secure(
           def.module,
           method === 'post'
-            ? 'can_create'
+            ? (req) =>
+                Array.isArray(req.body.items) ? 'can_edit' : 'can_create'
             : method === 'delete'
               ? 'can_delete'
               : 'can_edit',
         ),
         asyncHandler(async (req, res) => {
+          if (method === 'post' && Array.isArray(req.body.items))
+            return ok(
+              res,
+              await service.update(req, endpoint, req.params.id, {
+                items: req.body.items,
+              }),
+            );
           const result = await service.mutateLine(
             req,
             endpoint,

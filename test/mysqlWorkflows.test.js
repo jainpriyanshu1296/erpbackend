@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const mysql = require('mysql2/promise');
+const http = require('node:http');
 const { Sequelize } = require('sequelize');
 const { applyMigrationsToDb } = require('../src/migrations/run');
 
@@ -83,18 +84,39 @@ test(
     await new Promise((resolve) => server.once('listening', resolve));
     const url = `http://127.0.0.1:${server.address().port}/api/v1`;
     async function call(method, path, body, expected = 200, authToken = token) {
-      const res = await fetch(url + path, {
-        method,
-        headers: {
-          Host: 'acme.erp.test',
-          Authorization: `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
+      const { status, json } = await new Promise((resolve, reject) => {
+        const request = http.request(
+          url + path,
+          {
+            method,
+            headers: {
+              Host: 'acme.erp.test',
+              Authorization: `Bearer ${authToken}`,
+              'Content-Type': 'application/json',
+            },
+          },
+          (response) => {
+            let text = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => (text += chunk));
+            response.on('end', () => {
+              try {
+                resolve({
+                  status: response.statusCode,
+                  json: JSON.parse(text),
+                });
+              } catch (error) {
+                reject(error);
+              }
+            });
+          },
+        );
+        request.on('error', reject);
+        if (body !== undefined) request.write(JSON.stringify(body));
+        request.end();
       });
-      const json = await res.json();
       assert.equal(
-        res.status,
+        status,
         expected,
         `${method} ${path}: ${JSON.stringify(json)}`,
       );

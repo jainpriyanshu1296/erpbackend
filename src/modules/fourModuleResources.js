@@ -131,6 +131,7 @@ const resources = {
       children: lines('purchase_requisition_items', 'requisition_id', [
         'item_id',
         'quantity',
+        'rate',
         'notes',
       ]),
     },
