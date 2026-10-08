@@ -155,3 +155,66 @@ test('production completion transfers issued material cost into finished stock e
   assert.equal(second.already_applied, true);
   assert.equal(stock, original);
 });
+
+test('challan cancellation restores original ledger cost after carrying average changes', async () => {
+  const {
+    cancelJobWorkStockDocument,
+  } = require('../src/services/operationalDomains.service');
+  for (const originalValue of [50, 0]) {
+    const { db, state, ledger } = stockDb();
+    Object.assign(state, { current_qty: 90, avg_rate: 8, total_value: 720 });
+    const query = db.query;
+    db.query = async (sql, options) => {
+      if (sql.startsWith('SELECT * FROM job_work_challans'))
+        return [
+          [
+            {
+              id: 'challan',
+              status: 'posted',
+              warehouse_id: 'warehouse',
+              job_work_order_id: 'order',
+            },
+          ],
+        ];
+      if (sql.includes('SELECT COUNT(*) FROM job_work_receipts'))
+        return [[{ total: 0 }]];
+      if (sql.startsWith('SELECT item_id,quantity FROM job_work_challan_items'))
+        return [[{ item_id: 'item', quantity: 10 }]];
+      if (sql.startsWith('SELECT qty_out,amount FROM stock_ledger'))
+        return [[{ qty_out: 10, amount: originalValue }]];
+      return query(sql, options);
+    };
+    await cancelJobWorkStockDocument(
+      { orgDb: db, user: { sub: 'user' } },
+      'challan',
+      'challan',
+    );
+    assert.equal(state.current_qty, 100);
+    assert.equal(state.total_value, 720 + originalValue);
+    assert.equal(ledger()[9], originalValue / 10);
+  }
+});
+
+test('challan cancellation refuses inconsistent original stock ledger without changing stock', async () => {
+  const {
+    cancelJobWorkStockDocument,
+  } = require('../src/services/operationalDomains.service');
+  const { db, state } = stockDb();
+  const query = db.query;
+  db.query = async (sql, options) => {
+    if (sql.startsWith('SELECT * FROM job_work_challans'))
+      return [[{ id: 'challan', status: 'posted', warehouse_id: 'warehouse' }]];
+    if (sql.includes('SELECT COUNT(*) FROM job_work_receipts'))
+      return [[{ total: 0 }]];
+    if (sql.startsWith('SELECT item_id,quantity FROM job_work_challan_items'))
+      return [[{ item_id: 'item', quantity: 10 }]];
+    if (sql.startsWith('SELECT qty_out,amount FROM stock_ledger'))
+      return [[{ qty_out: 9, amount: 45 }]];
+    return query(sql, options);
+  };
+  await assert.rejects(
+    cancelJobWorkStockDocument({ orgDb: db }, 'challan', 'challan'),
+    /valuation is missing or inconsistent/,
+  );
+  assert.deepEqual(state, { current_qty: 10, avg_rate: 5, total_value: 50 });
+});

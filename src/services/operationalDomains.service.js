@@ -2341,6 +2341,43 @@ async function cancelJobWorkStockDocument(req, kind, id) {
       transaction: tx,
     });
     for (const item of items) {
+      let reversalRate = Number(item.rate || 0);
+      if (kind === 'challan') {
+        // Restore the original issued cost, even if the remaining stock's
+        // carrying average has changed since the outward challan was posted.
+        const [issuedLedger] = await req.orgDb.query(
+          'SELECT qty_out,amount FROM stock_ledger WHERE reference_type=? AND reference_id=? AND item_id=? AND warehouse_id=? AND qty_out>0 FOR UPDATE',
+          {
+            replacements: [
+              definition.referenceType,
+              id,
+              item.item_id,
+              document.warehouse_id,
+            ],
+            transaction: tx,
+          },
+        );
+        const issuedQuantity = issuedLedger.reduce(
+          (sum, row) => sum + Number(row.qty_out),
+          0,
+        );
+        const issuedValue = issuedLedger.reduce(
+          (sum, row) => sum + Number(row.amount),
+          0,
+        );
+        if (
+          !issuedLedger.length ||
+          !Number.isFinite(issuedValue) ||
+          issuedValue < 0 ||
+          Math.abs(issuedQuantity - Number(item.quantity)) > 0.0005
+        ) {
+          throw error(
+            'Original challan stock valuation is missing or inconsistent',
+            409,
+          );
+        }
+        reversalRate = issuedValue / issuedQuantity;
+      }
       await applyStockEffect(req.orgDb, {
         operationKey: `jobwork:cancel:${kind}:${id}:${item.item_id}`,
         referenceType: `${definition.referenceType}_reversal`,
@@ -2348,7 +2385,7 @@ async function cancelJobWorkStockDocument(req, kind, id) {
         itemId: item.item_id,
         warehouseId: document[definition.warehouseField],
         quantity: item.quantity,
-        rate: Number(item.rate || 0),
+        rate: reversalRate,
         direction: definition.reverseDirection,
         userId: req.user?.sub,
         transaction: tx,

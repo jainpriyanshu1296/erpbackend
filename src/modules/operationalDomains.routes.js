@@ -1603,7 +1603,7 @@ router.get(
          GROUP BY challan_id,item_id
        ) consumption ON consumption.challan_id=c.id AND consumption.item_id=ci.item_id
        WHERE c.status IN ('posted','completed')${searchWhere}${statusWhere}
-       HAVING pending_quantity > 0
+       AND ci.quantity-COALESCE(receipts.quantity,0)-COALESCE(consumption.quantity,0)>0
        ORDER BY ${sort} ${direction} LIMIT ? OFFSET ?`,
       { replacements: [...filterValues, limit, (current - 1) * limit] },
     );
@@ -1624,7 +1624,7 @@ router.get(
           GROUP BY challan_id,item_id
         ) consumption ON consumption.challan_id=c.id AND consumption.item_id=ci.item_id
         WHERE c.status IN ('posted','completed')${searchWhere}${statusWhere}
-        HAVING ci.quantity-COALESCE(receipts.quantity,0)-COALESCE(consumption.quantity,0)>0
+        AND ci.quantity-COALESCE(receipts.quantity,0)-COALESCE(consumption.quantity,0)>0
       ) pending`,
       { replacements: filterValues },
     );

@@ -125,6 +125,7 @@ test(
     await t.test(
       'draft purchase CRUD includes child CRUD and rejects posted edits',
       async () => {
+        await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
         const order = await call(
           'POST',
           '/purchase/orders',
@@ -185,6 +186,7 @@ test(
     await t.test(
       'all workspace list endpoints accept an empty tenant',
       async () => {
+        await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
         const paths = [
           '/purchase/requisitions',
           '/purchase/rfqs',
@@ -225,6 +227,7 @@ test(
     await t.test(
       'disabled modules and restricted roles deny both list and workflow endpoints',
       async () => {
+        await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
         await connection.query(`USE \`${masterName}\``);
         for (const [module, path] of [
           ['purchase', '/purchase/requisitions'],
@@ -258,8 +261,158 @@ test(
       },
     );
     await t.test(
+      'Purchase, Quality, Inventory and Production preserve stock and cost end-to-end',
+      async () => {
+        await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
+        await db.query(
+          "INSERT INTO warehouses(id,warehouse_code,warehouse_name) VALUES('flow-wh','FLOW-WH','Flow source'),('flow-wh2','FLOW-WH2','Flow destination')",
+        );
+        await db.query(
+          "INSERT INTO item_master(id,item_code,item_name) VALUES('flow-rm','FLOW-RM','Flow raw'),('flow-fg','FLOW-FG','Flow finished')",
+        );
+        async function stock(item, warehouse, quantity, value) {
+          const [[row]] = await db.query(
+            'SELECT current_qty,total_value FROM stock_summary WHERE item_id=? AND warehouse_id=?',
+            { replacements: [item, warehouse] },
+          );
+          assert.equal(Number(row?.current_qty || 0), quantity);
+          assert.equal(Number(row?.total_value || 0), value);
+        }
+        const po = await call(
+          'POST',
+          '/purchase/orders',
+          {
+            vendor_id: 'vendor',
+            warehouse_id: 'flow-wh',
+            items: [{ item_id: 'flow-rm', quantity: 10, rate: 5 }],
+          },
+          201,
+        );
+        await call('PUT', `/purchase/orders/${po.id}/status`, {
+          status: 'submitted',
+        });
+        await call('PUT', `/purchase/orders/${po.id}/status`, {
+          status: 'approved',
+        });
+        await call(
+          'PATCH',
+          `/purchase/orders/${po.id}`,
+          { notes: 'posted edit' },
+          409,
+        );
+        const grn = await call(
+          'POST',
+          '/purchase/grn',
+          {
+            po_id: po.id,
+            vendor_id: 'vendor',
+            warehouse_id: 'flow-wh',
+            items: [{ item_id: 'flow-rm', received_qty: 10, rate: 5 }],
+          },
+          201,
+        );
+        await call('POST', `/purchase/grn/${grn.id}/post`, {});
+        await stock('flow-rm', 'flow-wh', 0, 0);
+        const qc = await call(
+          'POST',
+          '/quality/inward',
+          {
+            reference_id: grn.id,
+            item_id: 'flow-rm',
+            inspected_qty: 10,
+            accepted_qty: 10,
+            rejected_qty: 0,
+          },
+          201,
+        );
+        await call('POST', `/quality/inspections/${qc.id}/process-result`, {
+          accepted_qty: 10,
+          rejected_qty: 0,
+        });
+        await call('POST', `/quality/inspections/${qc.id}/process-result`, {
+          accepted_qty: 10,
+          rejected_qty: 0,
+        });
+        await stock('flow-rm', 'flow-wh', 10, 50);
+        const transfer = await call(
+          'POST',
+          '/inventory/transfers',
+          {
+            from_warehouse_id: 'flow-wh',
+            to_warehouse_id: 'flow-wh2',
+            items: [{ item_id: 'flow-rm', quantity: 2, rate: 5 }],
+          },
+          201,
+        );
+        await call('POST', `/inventory/transfers/${transfer.id}/approve`, {});
+        await call('POST', `/inventory/transfers/${transfer.id}/receive`, {});
+        await call('POST', `/inventory/transfers/${transfer.id}/receive`, {});
+        await stock('flow-rm', 'flow-wh', 8, 40);
+        await stock('flow-rm', 'flow-wh2', 2, 10);
+        const reservation = await call('POST', '/inventory/reservations', {
+          item_id: 'flow-rm',
+          warehouse_id: 'flow-wh',
+          quantity: 1,
+        });
+        await call('PATCH', `/inventory/reservations/${reservation.id}`, {
+          quantity: 2,
+        });
+        await call('DELETE', `/inventory/reservations/${reservation.id}`);
+        const bom = await call(
+          'POST',
+          '/production/bom',
+          { bom_code: 'FLOW-BOM', finished_item_id: 'flow-fg', output_qty: 1 },
+          201,
+        );
+        await call('POST', `/production/bom/${bom.id}/components`, {
+          components: [
+            { item_id: 'flow-rm', quantity: 2, scrap_percent: 0, rate: 5 },
+          ],
+        });
+        const order = await call(
+          'POST',
+          '/production/orders',
+          { bom_id: bom.id, item_id: 'flow-fg', planned_qty: 2 },
+          201,
+        );
+        const released = await call(
+          'POST',
+          `/production/orders/${order.id}/release`,
+          {},
+        );
+        const wo = released.work_order_id;
+        const operation = await call(
+          'POST',
+          `/production/work-orders/${wo}/operations`,
+          { stage_name: 'Cut', sequence_no: 1 },
+          201,
+        );
+        await call(
+          'PATCH',
+          `/production/work-orders/${wo}/operations/${operation.id}`,
+          { notes: 'plan revised' },
+        );
+        await call(
+          'DELETE',
+          `/production/work-orders/${wo}/operations/${operation.id}`,
+        );
+        await call('POST', `/production/work-orders/${wo}/material-issue`, {
+          warehouse_id: 'flow-wh',
+        });
+        await call('POST', `/production/work-orders/${wo}/complete`, {
+          warehouse_id: 'flow-wh',
+        });
+        await call('POST', `/production/work-orders/${wo}/complete`, {
+          warehouse_id: 'flow-wh',
+        });
+        await stock('flow-rm', 'flow-wh', 4, 20);
+        await stock('flow-fg', 'flow-wh', 2, 20);
+      },
+    );
+    await t.test(
       'Job Work concurrent retry posts one document and one stock effect',
       async () => {
+        await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
         const body = {
           jw_number: 'JW-1',
           process_name: 'Process',
