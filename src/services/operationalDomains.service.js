@@ -368,7 +368,8 @@ async function closePeriod(req, periodKey) {
   }
 }
 async function reverseJournal(req, id) {
-  const tx = await req.orgDb.transaction();
+  const ownsTransaction = !req.transaction;
+  const tx = req.transaction || (await req.orgDb.transaction());
   try {
     const [rows] = await req.orgDb.query(
       'SELECT * FROM finance_journals WHERE id=? FOR UPDATE',
@@ -385,7 +386,7 @@ async function reverseJournal(req, id) {
       { replacements: [`REV-${rows[0].journal_number}`], transaction: tx },
     );
     if (existing[0]) {
-      await tx.commit();
+      if (ownsTransaction) await tx.commit();
       return {
         id,
         reversal_id: existing[0].id,
@@ -432,10 +433,10 @@ async function reverseJournal(req, id) {
       'UPDATE finance_journals SET status="reversed" WHERE id=?',
       { replacements: [id], transaction: tx },
     );
-    await tx.commit();
+    if (ownsTransaction) await tx.commit();
     return { id, reversal_id: reversalId, status: 'reversed' };
   } catch (e) {
-    await tx.rollback();
+    if (ownsTransaction) await tx.rollback();
     throw e;
   }
 }

@@ -101,6 +101,66 @@ test(
       return json.data;
     }
     await t.test(
+      'draft purchase CRUD includes child CRUD and rejects posted edits',
+      async () => {
+        const order = await call(
+          'POST',
+          '/purchase/orders',
+          {
+            vendor_id: 'vendor',
+            warehouse_id: 'wh',
+            items: [{ item_id: 'rm', quantity: 2, rate: 5 }],
+          },
+          201,
+        );
+        let detail = await call(
+          'GET',
+          `/operations/record?endpoint=%2Fpurchase%2Forders&id=${order.id}`,
+        );
+        const originalLine = detail.items[0].id;
+        await call('PUT', `/purchase/orders/${order.id}`, {
+          notes: 'updated',
+          items: [{ id: originalLine, item_id: 'rm', quantity: 3, rate: 8 }],
+        });
+        await call(
+          'PATCH',
+          `/purchase/orders/${order.id}/items/${originalLine}`,
+          { quantity: 4 },
+        );
+        await call(
+          'POST',
+          `/purchase/orders/${order.id}/items`,
+          { item_id: 'fg', quantity: 1, rate: 2 },
+          201,
+        );
+        detail = await call(
+          'GET',
+          `/operations/record?endpoint=%2Fpurchase%2Forders&id=${order.id}`,
+        );
+        assert.equal(detail.items.length, 2);
+        assert.equal(Number(detail.total_amount), 34);
+        const added = detail.items.find((line) => line.id !== originalLine);
+        await call('DELETE', `/purchase/orders/${order.id}/items/${added.id}`);
+        await call(
+          'DELETE',
+          `/purchase/orders/${order.id}/items/${originalLine}`,
+          undefined,
+          400,
+        );
+        await call('DELETE', `/purchase/orders/${order.id}`);
+        await call('GET', `/purchase/orders/${order.id}`, undefined, 404);
+        const setting = await call('POST', '/purchase/settings', {
+          setting_key: 'approval_required',
+          setting_value: 'true',
+        });
+        await call('PATCH', `/purchase/settings/${setting.setting_key}`, {
+          setting_value: 'false',
+        });
+        await call('GET', `/purchase/settings/${setting.setting_key}`);
+        await call('DELETE', `/purchase/settings/${setting.setting_key}`);
+      },
+    );
+    await t.test(
       'all workspace list endpoints accept an empty tenant',
       async () => {
         const paths = [

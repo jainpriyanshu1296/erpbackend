@@ -108,6 +108,7 @@ app.use((req, res, next) => {
   });
   next();
 });
+app.use('/api/v1', require('./modules/fourModuleCrud.routes'));
 app.get('/health/live', (req, res) =>
   ok(res, {
     service: 'erp-api',

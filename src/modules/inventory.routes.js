@@ -43,7 +43,7 @@ router.get(
     });
   }),
 );
-for (const method of ['post', 'put']) {
+for (const method of ['post', 'put', 'patch']) {
   router[method](
     method === 'post' ? '/categories' : '/categories/:id',
     permission('inventory', method === 'post' ? 'can_create' : 'can_edit'),
@@ -79,13 +79,13 @@ for (const method of ['post', 'put']) {
             code: 'CONFLICT',
           });
         }
-        if (method === 'put' && !old) {
+        if (method !== 'post' && !old) {
           throw Object.assign(new Error('Category not found'), {
             status: 404,
             code: 'NOT_FOUND',
           });
         }
-        if (method === 'put' && req.params.id !== category) {
+        if (method !== 'post' && req.params.id !== category) {
           const [[target]] = await req.orgDb.query(
             `SELECT category FROM ${categorySource} WHERE category=?`,
             { replacements: [category], transaction: tx },
@@ -125,6 +125,54 @@ for (const method of ['post', 'put']) {
   );
 }
 
+router.get(
+  '/categories/:id',
+  permission('inventory', 'can_view'),
+  asyncHandler(async (req, res) => {
+    const [[row]] = await req.orgDb.query(
+      `SELECT category id,category,is_active FROM ${categorySource} WHERE category=?`,
+      { replacements: [req.params.id] },
+    );
+    if (!row) return fail(res, 404, 'NOT_FOUND', 'Category not found');
+    return ok(res, row);
+  }),
+);
+router.delete(
+  '/categories/:id',
+  permission('inventory', 'can_delete'),
+  asyncHandler(async (req, res) => {
+    const result = await req.orgDb.transaction(async (transaction) => {
+      const [[row]] = await req.orgDb.query(
+        `SELECT category FROM ${categorySource} WHERE category=?`,
+        { replacements: [req.params.id], transaction },
+      );
+      if (!row)
+        throw Object.assign(new Error('Category not found'), {
+          status: 404,
+          code: 'NOT_FOUND',
+        });
+      await req.orgDb.query(
+        'INSERT INTO company_settings(setting_key,setting_value) VALUES(?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)',
+        {
+          replacements: [`inventory.category.${req.params.id}`, '0'],
+          transaction,
+        },
+      );
+      await require('./inventoryPurchase.service').audit(
+        req.orgDb,
+        req.user.sub,
+        'inventory',
+        'category.deactivated',
+        'category',
+        req.params.id,
+        {},
+        transaction,
+      );
+      return { id: req.params.id, is_active: 0 };
+    });
+    return ok(res, result);
+  }),
+);
 router.get(
   '/uom',
   permission('inventory', 'can_view'),
@@ -173,7 +221,7 @@ router.get(
     return row ? ok(res, row) : fail(res, 404, 'NOT_FOUND', 'Unit not found');
   }),
 );
-for (const method of ['post', 'put']) {
+for (const method of ['post', 'put', 'patch']) {
   router[method](
     method === 'post' ? '/uom' : '/uom/:id',
     permission('inventory', method === 'post' ? 'can_create' : 'can_edit'),
@@ -201,7 +249,7 @@ for (const method of ['post', 'put']) {
         req.body.is_active === undefined || req.body.is_active === ''
           ? 1
           : Number(req.body.is_active);
-      if (method === 'put') {
+      if (method !== 'post') {
         const [[existing]] = await req.orgDb.query(
           'SELECT id FROM uom_master WHERE id=?',
           { replacements: [req.params.id] },
