@@ -436,7 +436,7 @@ async function applyStockEffect(
     itemId,
     warehouseId,
     quantity,
-    rate = 0,
+    rate,
     direction,
     userId,
     batchId,
@@ -452,6 +452,14 @@ async function applyStockEffect(
   assert(
     Number.isFinite(qty) && qty > 0,
     'Stock quantity must be greater than zero',
+  );
+  assert(
+    ['in', 'out'].includes(direction),
+    'Stock direction must be in or out',
+  );
+  assert(
+    rate === undefined || (Number.isFinite(Number(rate)) && Number(rate) >= 0),
+    'Stock rate must be a non-negative number',
   );
   const tx = transaction || (await db.transaction());
   const ownsTransaction = !transaction;
@@ -514,7 +522,11 @@ async function applyStockEffect(
     }
     const next = direction === 'out' ? current - qty : current + qty;
     const oldValue = Number(stockRows[0]?.total_value || 0);
-    const value = qty * Number(rate || stockRows[0]?.avg_rate || 0);
+    const movementRate =
+      direction === 'out'
+        ? Number(stockRows[0]?.avg_rate || 0)
+        : Number(rate ?? stockRows[0]?.avg_rate ?? 0);
+    const value = qty * movementRate;
     const totalValue =
       direction === 'out' ? oldValue - value : oldValue + value;
     const averageRate =
@@ -551,7 +563,7 @@ async function applyStockEffect(
           direction === 'in' ? qty : 0,
           direction === 'out' ? qty : 0,
           next,
-          rate || 0,
+          movementRate,
           value,
           userId || null,
           JSON.stringify({

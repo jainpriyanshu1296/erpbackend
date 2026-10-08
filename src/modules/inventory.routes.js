@@ -4,6 +4,7 @@ const { ok, fail, created, asyncHandler } = require('../utils/response');
 const permission = require('../middleware/permission');
 
 const router = express.Router();
+router.use(require('../middleware/moduleGuard')('inventory'));
 const listQuery = require('../utils/listQuery');
 
 // Category membership remains item_master.category. Empty and inactive groups
@@ -271,10 +272,17 @@ router.get(
   '/transfers',
   permission('inventory', 'can_view'),
   asyncHandler(async (req, res) => {
-    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
-      ['created_at', 'transfer_number', 'status'], 'created_at');
+    const { page, limit, offset, search, sort, direction } = listQuery(
+      req.query,
+      ['created_at', 'transfer_number', 'status'],
+      'created_at',
+    );
     const status = typeof req.query.status === 'string' ? req.query.status : '';
-    const sortColumn = { created_at: 'wt.created_at', transfer_number: 'wt.transfer_number', status: 'wt.status' }[sort];
+    const sortColumn = {
+      created_at: 'wt.created_at',
+      transfer_number: 'wt.transfer_number',
+      status: 'wt.status',
+    }[sort];
 
     let where = 'WHERE 1=1';
     const replacements = [];
@@ -473,13 +481,23 @@ router.post(
 
       await req.orgDb.query(
         'UPDATE warehouse_transfers SET status=?,approved_by=?,approved_at=NOW() WHERE id=?',
-        { replacements: ['approved', req.user.sub, req.params.id], transaction },
+        {
+          replacements: ['approved', req.user.sub, req.params.id],
+          transaction,
+        },
       );
       await req.orgDb.query(
         'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
         {
-          replacements: [uuid(), req.user.sub, 'inventory', 'inventory.transfer.approve',
-            'warehouse_transfer', req.params.id, JSON.stringify({ from: 'draft', to: 'approved' })],
+          replacements: [
+            uuid(),
+            req.user.sub,
+            'inventory',
+            'inventory.transfer.approve',
+            'warehouse_transfer',
+            req.params.id,
+            JSON.stringify({ from: 'draft', to: 'approved' }),
+          ],
           transaction,
         },
       );
@@ -537,10 +555,17 @@ router.get(
   '/adjustments',
   permission('inventory', 'can_view'),
   asyncHandler(async (req, res) => {
-    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
-      ['created_at', 'adjustment_number', 'status'], 'created_at');
+    const { page, limit, offset, search, sort, direction } = listQuery(
+      req.query,
+      ['created_at', 'adjustment_number', 'status'],
+      'created_at',
+    );
     const status = typeof req.query.status === 'string' ? req.query.status : '';
-    const sortColumn = { created_at: 'sa.created_at', adjustment_number: 'sa.adjustment_number', status: 'sa.status' }[sort];
+    const sortColumn = {
+      created_at: 'sa.created_at',
+      adjustment_number: 'sa.adjustment_number',
+      status: 'sa.status',
+    }[sort];
 
     let where = 'WHERE 1=1';
     const replacements = [];
@@ -695,10 +720,17 @@ router.get(
   '/ledger',
   permission('inventory', 'can_view'),
   asyncHandler(async (req, res) => {
-    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
-      ['transaction_date', 'transaction_type', 'qty_in', 'qty_out'], 'transaction_date');
-    const sortColumn = { transaction_date: 'sl.transaction_date', transaction_type: 'sl.transaction_type',
-      qty_in: 'sl.qty_in', qty_out: 'sl.qty_out' }[sort];
+    const { page, limit, offset, search, sort, direction } = listQuery(
+      req.query,
+      ['transaction_date', 'transaction_type', 'qty_in', 'qty_out'],
+      'transaction_date',
+    );
+    const sortColumn = {
+      transaction_date: 'sl.transaction_date',
+      transaction_type: 'sl.transaction_type',
+      qty_in: 'sl.qty_in',
+      qty_out: 'sl.qty_out',
+    }[sort];
     const itemId = req.query.item_id || '';
     const warehouseId = req.query.warehouse_id || '';
     const transactionType = req.query.transaction_type || '';
@@ -719,7 +751,8 @@ router.get(
       replacements.push(transactionType);
     }
     if (search) {
-      where += ' AND (im.item_code LIKE ? OR im.item_name LIKE ? OR w.warehouse_name LIKE ? OR sl.reference_id LIKE ?)';
+      where +=
+        ' AND (im.item_code LIKE ? OR im.item_name LIKE ? OR w.warehouse_name LIKE ? OR sl.reference_id LIKE ?)';
       replacements.push(...Array(4).fill(`%${search}%`));
     }
 

@@ -139,6 +139,12 @@ app.use('/api/v1/public/onboarding', onboardingRoutes);
 app.use('/api/v1/auth', authRoutes);
 const protectedRouter = express.Router();
 protectedRouter.use(auth, orgContext, entitlement, activity);
+protectedRouter.use((req, res, next) => {
+  const module = req.path.split('/')[1];
+  return ['purchase', 'inventory', 'production', 'jobwork'].includes(module)
+    ? require('./middleware/moduleGuard')(module)(req, res, next)
+    : next();
+});
 protectedRouter.get(
   '/org/info',
   permission('settings', 'can_view'),

@@ -457,7 +457,8 @@ async function createFinanceDocument(req, body) {
       throw error(`Invalid ${field}`);
     }
   }
-  const tx = await req.orgDb.transaction();
+  const ownsTransaction = !req.transaction;
+  const tx = req.transaction || (await req.orgDb.transaction());
   try {
     if (body.document_type === 'payable') {
       const [[vendor]] = await req.orgDb.query(
@@ -502,14 +503,14 @@ async function createFinanceDocument(req, body) {
     if (body.document_type === 'payable') {
       await postVendorInvoiceEffect(req.orgDb, id, req.user?.sub, tx);
     }
-    await tx.commit();
+    if (ownsTransaction) await tx.commit();
     return {
       id,
       status: 'open',
       journal_posted: body.document_type === 'payable',
     };
   } catch (e) {
-    await tx.rollback();
+    if (ownsTransaction) await tx.rollback();
     throw e;
   }
 }
@@ -1427,6 +1428,7 @@ async function recordAudit(
   await req.orgDb.query(
     'INSERT INTO activity_log(id,user_id,module,action,reference_type,reference_id,changes,ip_address) VALUES(?,?,?,?,?,?,?,?)',
     {
+      transaction: req.transaction,
       replacements: [
         require('uuid').v4(),
         req.user?.sub || null,
@@ -1462,7 +1464,10 @@ async function jobWorkSettings(req) {
     "SELECT setting_key,setting_value FROM company_settings WHERE setting_key LIKE 'jobwork.%'",
   );
   return Object.fromEntries(
-    rows.map((row) => [row.setting_key.replace('jobwork.', ''), row.setting_value]),
+    rows.map((row) => [
+      row.setting_key.replace('jobwork.', ''),
+      row.setting_value,
+    ]),
   );
 }
 
@@ -1478,9 +1483,10 @@ async function issueJobWorkChallan(req, body = {}) {
     );
   }
   const items = jobWorkItems(body.items);
-  return withIdempotency(req, 'jobwork.challan.issue', async () => {
-    const tx = await req.orgDb.transaction();
-    try {
+  return withJobWorkTransaction(
+    req,
+    'jobwork.challan.issue',
+    async (tx, req) => {
       const [[order]] = await req.orgDb.query(
         'SELECT * FROM job_work_orders WHERE id=? FOR UPDATE',
         { replacements: [body.job_work_order_id], transaction: tx },
@@ -1531,8 +1537,14 @@ async function issueJobWorkChallan(req, body = {}) {
              WHERE c.job_work_order_id=? AND c.status IN ('posted','completed') AND ci.item_id=?`,
             { replacements: [order.id, item.item_id], transaction: tx },
           );
-          if (Number(issued.quantity) + item.quantity > Number(order.quantity)) {
-            throw error('Outward quantity exceeds the job work order quantity', 409);
+          if (
+            Number(issued.quantity) + item.quantity >
+            Number(order.quantity)
+          ) {
+            throw error(
+              'Outward quantity exceeds the job work order quantity',
+              409,
+            );
           }
         }
         await req.orgDb.query(
@@ -1566,13 +1578,9 @@ async function issueJobWorkChallan(req, body = {}) {
         challanId,
         { job_work_order_id: order.id, items },
       );
-      await tx.commit();
       return { id: challanId, status: 'posted', items };
-    } catch (err) {
-      await tx.rollback();
-      throw err;
-    }
-  });
+    },
+  );
 }
 
 async function receiveJobWorkMaterial(req, body = {}) {
@@ -1593,9 +1601,10 @@ async function receiveJobWorkMaterial(req, body = {}) {
   if (!Number.isFinite(rate) || rate < 0) {
     throw error('rate must be a non-negative number');
   }
-  return withIdempotency(req, 'jobwork.receipt.post', async () => {
-    const tx = await req.orgDb.transaction();
-    try {
+  return withJobWorkTransaction(
+    req,
+    'jobwork.receipt.post',
+    async (tx, req) => {
       const [[challan]] = await req.orgDb.query(
         'SELECT * FROM job_work_challans WHERE id=? FOR UPDATE',
         { replacements: [body.challan_id], transaction: tx },
@@ -1641,7 +1650,9 @@ async function receiveJobWorkMaterial(req, body = {}) {
           { replacements: [challan.id, item.item_id], transaction: tx },
         );
         if (
-          item.quantity + Number(received.quantity) + Number(consumed.quantity) >
+          item.quantity +
+            Number(received.quantity) +
+            Number(consumed.quantity) >
           Number(issued.quantity)
         ) {
           throw error(
@@ -1733,13 +1744,9 @@ async function receiveJobWorkMaterial(req, body = {}) {
           requires_qc: Boolean(body.requires_qc),
         },
       );
-      await tx.commit();
       return { id: receiptId, status: 'posted', items };
-    } catch (err) {
-      await tx.rollback();
-      throw err;
-    }
-  });
+    },
+  );
 }
 
 async function recordJobWorkConsumption(req, body = {}) {
@@ -1750,9 +1757,10 @@ async function recordJobWorkConsumption(req, body = {}) {
   if (!Number.isFinite(quantity) || quantity <= 0) {
     throw error('Consumption quantity must be positive');
   }
-  return withIdempotency(req, 'jobwork.consumption.create', async () => {
-    const tx = await req.orgDb.transaction();
-    try {
+  return withJobWorkTransaction(
+    req,
+    'jobwork.consumption.create',
+    async (tx, req) => {
       const [[challan]] = await req.orgDb.query(
         'SELECT id,status FROM job_work_challans WHERE id=? FOR UPDATE',
         { replacements: [body.challan_id], transaction: tx },
@@ -1776,7 +1784,10 @@ async function recordJobWorkConsumption(req, body = {}) {
         quantity + Number(consumed.quantity) + Number(received.quantity) >
         Number(issued.quantity)
       ) {
-        throw error('Consumption exceeds material issued to the job worker', 409);
+        throw error(
+          'Consumption exceeds material issued to the job worker',
+          409,
+        );
       }
       const id = uuid();
       await req.orgDb.query(
@@ -1813,14 +1824,17 @@ async function recordJobWorkConsumption(req, body = {}) {
           { replacements: [challan.id], transaction: tx },
         );
       }
-      await recordAudit(req, 'jobwork', 'jobwork.consumption.create', 'job_work_consumption', id, { challan_id: challan.id, item_id: body.item_id, quantity });
-      await tx.commit();
+      await recordAudit(
+        req,
+        'jobwork',
+        'jobwork.consumption.create',
+        'job_work_consumption',
+        id,
+        { challan_id: challan.id, item_id: body.item_id, quantity },
+      );
       return { id, challan_id: challan.id, item_id: body.item_id, quantity };
-    } catch (err) {
-      await tx.rollback();
-      throw err;
-    }
-  });
+    },
+  );
 }
 
 async function receiveJobWorkFinishedGoods(req, body = {}) {
@@ -1833,8 +1847,15 @@ async function receiveJobWorkFinishedGoods(req, body = {}) {
         ? ['true', '1'].includes(String(settings.require_inward_qc))
         : body.requires_qc,
   };
-  if (!body.challan_id || !body.receipt_number || !body.item_id || !body.warehouse_id) {
-    throw error('challan_id, receipt_number, item_id and warehouse_id are required');
+  if (
+    !body.challan_id ||
+    !body.receipt_number ||
+    !body.item_id ||
+    !body.warehouse_id
+  ) {
+    throw error(
+      'challan_id, receipt_number, item_id and warehouse_id are required',
+    );
   }
   const quantity = Number(body.quantity);
   const rate = Number(body.rate || 0);
@@ -1844,11 +1865,14 @@ async function receiveJobWorkFinishedGoods(req, body = {}) {
     !Number.isFinite(rate) ||
     rate < 0
   ) {
-    throw error('Finished goods quantity must be positive and rate non-negative');
+    throw error(
+      'Finished goods quantity must be positive and rate non-negative',
+    );
   }
-  return withIdempotency(req, 'jobwork.finished_goods.receive', async () => {
-    const tx = await req.orgDb.transaction();
-    try {
+  return withJobWorkTransaction(
+    req,
+    'jobwork.finished_goods.receive',
+    async (tx, req) => {
       const [[challan]] = await req.orgDb.query(
         `SELECT c.id,c.status,c.job_work_order_id,o.quantity order_quantity
          FROM job_work_challans c
@@ -1859,9 +1883,16 @@ async function receiveJobWorkFinishedGoods(req, body = {}) {
       if (!challan || !['posted', 'completed'].includes(challan.status)) {
         throw error('Finished receipt requires a posted job work challan', 409);
       }
-      const [[item]] = await req.orgDb.query('SELECT id FROM item_master WHERE id=? AND is_active=1', { replacements: [body.item_id], transaction: tx });
-      const [[warehouse]] = await req.orgDb.query('SELECT id FROM warehouses WHERE id=? AND is_active=1', { replacements: [body.warehouse_id], transaction: tx });
-      if (!item || !warehouse) throw error('Choose an active item and warehouse');
+      const [[item]] = await req.orgDb.query(
+        'SELECT id FROM item_master WHERE id=? AND is_active=1',
+        { replacements: [body.item_id], transaction: tx },
+      );
+      const [[warehouse]] = await req.orgDb.query(
+        'SELECT id FROM warehouses WHERE id=? AND is_active=1',
+        { replacements: [body.warehouse_id], transaction: tx },
+      );
+      if (!item || !warehouse)
+        throw error('Choose an active item and warehouse');
       const [[received]] = await req.orgDb.query(
         `SELECT COALESCE(SUM(f.quantity),0) quantity
          FROM job_work_finished_goods_receipts f
@@ -1869,12 +1900,47 @@ async function receiveJobWorkFinishedGoods(req, body = {}) {
          WHERE c.job_work_order_id=? AND f.status<>'cancelled' FOR UPDATE`,
         { replacements: [challan.job_work_order_id], transaction: tx },
       );
-      if (Number(received.quantity) + quantity > Number(challan.order_quantity)) {
-        throw error('Finished goods quantity exceeds the job work order quantity', 409);
+      if (
+        Number(received.quantity) + quantity >
+        Number(challan.order_quantity)
+      ) {
+        throw error(
+          'Finished goods quantity exceeds the job work order quantity',
+          409,
+        );
       }
       const id = uuid();
-      await req.orgDb.query('INSERT INTO job_work_finished_goods_receipts(id,challan_id,receipt_number,item_id,warehouse_id,quantity,rate,receipt_date,requires_qc,status,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)', { replacements: [id, challan.id, body.receipt_number, body.item_id, body.warehouse_id, quantity, rate, body.receipt_date || new Date().toISOString().slice(0, 10), body.requires_qc ? 1 : 0, 'posted', req.user?.sub || null], transaction: tx });
-      await applyStockEffect(req.orgDb, { operationKey: `jobwork:finished:${id}:${body.item_id}`, referenceType: 'job_work_finished_goods_receipt', referenceId: id, itemId: body.item_id, warehouseId: body.warehouse_id, quantity, rate, direction: 'in', userId: req.user?.sub, transaction: tx });
+      await req.orgDb.query(
+        'INSERT INTO job_work_finished_goods_receipts(id,challan_id,receipt_number,item_id,warehouse_id,quantity,rate,receipt_date,requires_qc,status,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        {
+          replacements: [
+            id,
+            challan.id,
+            body.receipt_number,
+            body.item_id,
+            body.warehouse_id,
+            quantity,
+            rate,
+            body.receipt_date || new Date().toISOString().slice(0, 10),
+            body.requires_qc ? 1 : 0,
+            'posted',
+            req.user?.sub || null,
+          ],
+          transaction: tx,
+        },
+      );
+      await applyStockEffect(req.orgDb, {
+        operationKey: `jobwork:finished:${id}:${body.item_id}`,
+        referenceType: 'job_work_finished_goods_receipt',
+        referenceId: id,
+        itemId: body.item_id,
+        warehouseId: body.warehouse_id,
+        quantity,
+        rate,
+        direction: 'in',
+        userId: req.user?.sub,
+        transaction: tx,
+      });
       if (body.requires_qc) {
         const inspectionId = uuid();
         await req.orgDb.query(
@@ -1897,37 +1963,46 @@ async function receiveJobWorkFinishedGoods(req, body = {}) {
           },
         );
       }
-      await recordAudit(req, 'jobwork', 'jobwork.finished_goods.receive', 'job_work_finished_goods_receipt', id, { challan_id: challan.id, item_id: body.item_id, quantity });
-      await tx.commit();
+      await recordAudit(
+        req,
+        'jobwork',
+        'jobwork.finished_goods.receive',
+        'job_work_finished_goods_receipt',
+        id,
+        { challan_id: challan.id, item_id: body.item_id, quantity },
+      );
       return { id, status: 'posted' };
-    } catch (err) {
-      await tx.rollback();
-      throw err;
-    }
-  });
+    },
+  );
 }
 
 async function createJobWorkBill(req, body = {}) {
   if (!body.job_work_order_id || !body.document_number || !body.document_date) {
-    throw error('job_work_order_id, document_number and document_date are required');
+    throw error(
+      'job_work_order_id, document_number and document_date are required',
+    );
   }
-  return withIdempotency(req, 'jobwork.bill.create', async () => {
+  return withJobWorkTransaction(req, 'jobwork.bill.create', async (tx, req) => {
     const [[order]] = await req.orgDb.query(
-      'SELECT id,order_type,vendor_id,customer_id,status FROM job_work_orders WHERE id=? LIMIT 1',
-      { replacements: [body.job_work_order_id] },
+      'SELECT id,order_type,vendor_id,customer_id,status FROM job_work_orders WHERE id=? FOR UPDATE',
+      { replacements: [body.job_work_order_id], transaction: tx },
     );
     if (!order || ['draft', 'cancelled'].includes(order.status)) {
       throw error('Billing requires an approved Job Work order', 409);
     }
     const billType = body.bill_type || order.order_type;
-    if (!['vendor', 'customer'].includes(billType) || billType !== order.order_type) {
+    if (
+      !['vendor', 'customer'].includes(billType) ||
+      billType !== order.order_type
+    ) {
       throw error('Bill type must match the Job Work order type');
     }
-    const partyId = billType === 'customer' ? order.customer_id : order.vendor_id;
+    const partyId =
+      billType === 'customer' ? order.customer_id : order.vendor_id;
     const partyTable = billType === 'customer' ? 'customers' : 'vendors';
     const [[party]] = await req.orgDb.query(
       `SELECT id FROM ${partyTable} WHERE id=? AND is_active=1`,
-      { replacements: [partyId] },
+      { replacements: [partyId], transaction: tx },
     );
     if (!party) {
       throw error(`Choose an active ${billType}`);
@@ -1947,6 +2022,7 @@ async function createJobWorkBill(req, body = {}) {
           billType,
           req.user?.sub || null,
         ],
+        transaction: tx,
       },
     );
     await recordAudit(
@@ -1998,11 +2074,13 @@ async function createJobWorkOrder(req, body = {}) {
   ) {
     throw error(`A ${orderType} party is required`);
   }
-  return withIdempotency(req, 'jobwork.order.create', async () => {
-    const tx = await req.orgDb.transaction();
-    try {
+  return withJobWorkTransaction(
+    req,
+    'jobwork.order.create',
+    async (tx, req) => {
       const partyTable = orderType === 'vendor' ? 'vendors' : 'customers';
-      const partyId = orderType === 'vendor' ? body.vendor_id : body.customer_id;
+      const partyId =
+        orderType === 'vendor' ? body.vendor_id : body.customer_id;
       const [[party]] = await req.orgDb.query(
         `SELECT id FROM ${partyTable} WHERE id=? AND is_active=1`,
         { replacements: [partyId], transaction: tx },
@@ -2044,14 +2122,17 @@ async function createJobWorkOrder(req, body = {}) {
           transaction: tx,
         },
       );
-      await tx.commit();
-      await recordAudit(req, 'jobwork', 'jobwork.order.create', 'job_work_order', id, body);
+      await recordAudit(
+        req,
+        'jobwork',
+        'jobwork.order.create',
+        'job_work_order',
+        id,
+        body,
+      );
       return { id, status: 'draft' };
-    } catch (err) {
-      await tx.rollback();
-      throw err;
-    }
-  });
+    },
+  );
 }
 
 async function updateJobWorkOrder(req, id, body = {}) {
@@ -2065,12 +2146,7 @@ async function updateJobWorkOrder(req, id, body = {}) {
     if (order.status !== 'draft') {
       throw error('Only draft job work orders can be edited', 409);
     }
-    const allowed = [
-      'process_name',
-      'expected_return_date',
-      'notes',
-      'rate',
-    ];
+    const allowed = ['process_name', 'expected_return_date', 'notes', 'rate'];
     const keys = Object.keys(body).filter((key) => allowed.includes(key));
     if (!keys.length) throw error('No editable fields supplied');
     if (
@@ -2086,8 +2162,15 @@ async function updateJobWorkOrder(req, id, body = {}) {
         transaction: tx,
       },
     );
+    await recordAudit(
+      { ...req, transaction: tx },
+      'jobwork',
+      'jobwork.order.update',
+      'job_work_order',
+      id,
+      body,
+    );
     await tx.commit();
-    await recordAudit(req, 'jobwork', 'jobwork.order.update', 'job_work_order', id, body);
     return { id, status: order.status };
   } catch (err) {
     await tx.rollback();
@@ -2110,7 +2193,10 @@ async function transitionJobWorkOrder(req, id, action) {
     };
     const transition = transitions[action];
     if (!transition || !transition.from.includes(order.status)) {
-      throw error(`Job work order cannot be ${action}led from ${order.status}`, 409);
+      throw error(
+        `Job work order cannot be ${action}led from ${order.status}`,
+        409,
+      );
     }
     if (action === 'cancel') {
       const [[effects]] = await req.orgDb.query(
@@ -2145,18 +2231,28 @@ async function transitionJobWorkOrder(req, id, action) {
         { replacements: [id], transaction: tx },
       );
       if (Number(pending.total)) {
-        throw error('Resolve all pending material before completing the order', 409);
+        throw error(
+          'Resolve all pending material before completing the order',
+          409,
+        );
       }
     }
     await req.orgDb.query('UPDATE job_work_orders SET status=? WHERE id=?', {
       replacements: [transition.to, id],
       transaction: tx,
     });
+    await recordAudit(
+      { ...req, transaction: tx },
+      'jobwork',
+      `jobwork.order.${action}`,
+      'job_work_order',
+      id,
+      {
+        from: order.status,
+        to: transition.to,
+      },
+    );
     await tx.commit();
-    await recordAudit(req, 'jobwork', `jobwork.order.${action}`, 'job_work_order', id, {
-      from: order.status,
-      to: transition.to,
-    });
     return { id, status: transition.to };
   } catch (err) {
     await tx.rollback();
@@ -2168,21 +2264,24 @@ async function cancelJobWorkStockDocument(req, kind, id) {
   const definitions = {
     challan: {
       table: 'job_work_challans',
-      itemSql: 'SELECT item_id,quantity FROM job_work_challan_items WHERE challan_id=?',
+      itemSql:
+        'SELECT item_id,quantity FROM job_work_challan_items WHERE challan_id=?',
       referenceType: 'job_work_challan',
       reverseDirection: 'in',
       warehouseField: 'warehouse_id',
     },
     receipt: {
       table: 'job_work_receipts',
-      itemSql: 'SELECT item_id,quantity,rate FROM job_work_receipt_items WHERE receipt_id=?',
+      itemSql:
+        'SELECT item_id,quantity,rate FROM job_work_receipt_items WHERE receipt_id=?',
       referenceType: 'job_work_receipt',
       reverseDirection: 'out',
       warehouseField: 'warehouse_id',
     },
     finished: {
       table: 'job_work_finished_goods_receipts',
-      itemSql: 'SELECT item_id,quantity,rate FROM job_work_finished_goods_receipts WHERE id=?',
+      itemSql:
+        'SELECT item_id,quantity,rate FROM job_work_finished_goods_receipts WHERE id=?',
       referenceType: 'job_work_finished_goods_receipt',
       reverseDirection: 'out',
       warehouseField: 'warehouse_id',
@@ -2226,7 +2325,10 @@ async function cancelJobWorkStockDocument(req, kind, id) {
         { replacements: [sourceType, id], transaction: tx },
       );
       if (Number(processedInspection.total)) {
-        throw error('Processed Quality inspections must be reversed before cancellation', 409);
+        throw error(
+          'Processed Quality inspections must be reversed before cancellation',
+          409,
+        );
       }
       await req.orgDb.query(
         "UPDATE qc_inspections SET status='cancelled' WHERE source_type=? AND source_id=? AND status='pending'",
@@ -2257,8 +2359,15 @@ async function cancelJobWorkStockDocument(req, kind, id) {
     );
     if (kind === 'challan') {
       await req.orgDb.query(
-        "UPDATE job_work_orders SET status='approved' WHERE id=? AND status='sent'",
-        { replacements: [document.job_work_order_id], transaction: tx },
+        `UPDATE job_work_orders SET status='approved' WHERE id=? AND status='sent'
+         AND NOT EXISTS (SELECT 1 FROM job_work_challans WHERE job_work_order_id=? AND status IN ('posted','completed'))`,
+        {
+          replacements: [
+            document.job_work_order_id,
+            document.job_work_order_id,
+          ],
+          transaction: tx,
+        },
       );
     }
     if (kind === 'receipt') {
@@ -2267,8 +2376,14 @@ async function cancelJobWorkStockDocument(req, kind, id) {
         { replacements: [document.challan_id], transaction: tx },
       );
     }
+    await recordAudit(
+      { ...req, transaction: tx },
+      'jobwork',
+      `jobwork.${kind}.cancel`,
+      definition.referenceType,
+      id,
+    );
     await tx.commit();
-    await recordAudit(req, 'jobwork', `jobwork.${kind}.cancel`, definition.referenceType, id);
     return { id, status: 'cancelled' };
   } catch (err) {
     await tx.rollback();
@@ -2296,13 +2411,52 @@ async function cancelJobWorkConsumption(req, id) {
       "UPDATE job_work_challans SET status='posted' WHERE id=? AND status='completed'",
       { replacements: [record.challan_id], transaction: tx },
     );
+    await recordAudit(
+      { ...req, transaction: tx },
+      'jobwork',
+      'jobwork.consumption.cancel',
+      'job_work_consumption',
+      id,
+    );
     await tx.commit();
-    await recordAudit(req, 'jobwork', 'jobwork.consumption.cancel', 'job_work_consumption', id);
     return { id, status: 'cancelled' };
   } catch (err) {
     await tx.rollback();
     throw err;
   }
+}
+
+async function withJobWorkTransaction(req, operation, work) {
+  const key = req.get?.('Idempotency-Key') || req.body?.idempotency_key;
+  if (key && (typeof key !== 'string' || key.length > 150)) {
+    throw error('Idempotency key must be a string of at most 150 characters');
+  }
+  return req.orgDb.transaction(async (transaction) => {
+    if (key) {
+      // The unique key serializes concurrent retries before any stock mutation.
+      await req.orgDb.query(
+        'INSERT INTO domain_idempotency(id,idempotency_key,operation,response_json) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE id=id',
+        { replacements: [uuid(), key, operation, 'null'], transaction },
+      );
+      const [[saved]] = await req.orgDb.query(
+        'SELECT response_json FROM domain_idempotency WHERE idempotency_key=? AND operation=? FOR UPDATE',
+        { replacements: [key, operation], transaction },
+      );
+      const response =
+        typeof saved.response_json === 'string'
+          ? JSON.parse(saved.response_json)
+          : saved.response_json;
+      if (response !== null) return response;
+    }
+    const result = await work(transaction, { ...req, transaction });
+    if (key) {
+      await req.orgDb.query(
+        'UPDATE domain_idempotency SET response_json=? WHERE idempotency_key=? AND operation=?',
+        { replacements: [JSON.stringify(result), key, operation], transaction },
+      );
+    }
+    return result;
+  });
 }
 
 async function withIdempotency(req, operation, work) {

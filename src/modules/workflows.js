@@ -47,6 +47,12 @@ workflow.use(
   require('../middleware/entitlement'),
   activity,
 );
+workflow.use((req, res, next) => {
+  const module = req.path.split('/')[1];
+  return ['purchase', 'inventory', 'production', 'jobwork'].includes(module)
+    ? require('../middleware/moduleGuard')(module)(req, res, next)
+    : next();
+});
 
 async function lines(db, table, foreignKey, id, transaction) {
   const [rows] = await db.query(
@@ -82,8 +88,12 @@ workflow.post(
         'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
         {
           replacements: [
-            uuid(), req.user.sub, 'purchase', 'purchase.requisition.submit',
-            'purchase_requisition', req.params.id,
+            uuid(),
+            req.user.sub,
+            'purchase',
+            'purchase.requisition.submit',
+            'purchase_requisition',
+            req.params.id,
             JSON.stringify({ from: requisitions[0].status, to: 'submitted' }),
           ],
           transaction,
@@ -92,8 +102,14 @@ workflow.post(
       return { id: req.params.id, status: 'submitted' };
     });
     if (result.error) {
-      return fail(res, result.error === 'NOT_FOUND' ? 404 : 409, result.error,
-        result.error === 'EMPTY_REQUISITION' ? 'Add items before submitting' : 'Requisition cannot be submitted');
+      return fail(
+        res,
+        result.error === 'NOT_FOUND' ? 404 : 409,
+        result.error,
+        result.error === 'EMPTY_REQUISITION'
+          ? 'Add items before submitting'
+          : 'Requisition cannot be submitted',
+      );
     }
     return ok(res, result);
   }),
@@ -126,9 +142,15 @@ workflow.post(
         );
       }
       const itemIds = [...new Set(items.map((item) => item.item_id))];
-      if (itemIds.length !== items.length || items.some((item) =>
-        !item.item_id || !Number.isFinite(Number(item.quantity)) || Number(item.quantity) <= 0
-      )) {
+      if (
+        itemIds.length !== items.length ||
+        items.some(
+          (item) =>
+            !item.item_id ||
+            !Number.isFinite(Number(item.quantity)) ||
+            Number(item.quantity) <= 0,
+        )
+      ) {
         throw invalid('Use unique active items with positive quantities');
       }
       const [activeItems] = await req.orgDb.query(
@@ -163,8 +185,18 @@ workflow.post(
       }
       await req.orgDb.query(
         'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
-        { replacements: [uuid(), req.user.sub, 'purchase', 'purchase.requisition.items.update',
-          'purchase_requisition', req.params.id, JSON.stringify({ item_count: items.length })], transaction: tx },
+        {
+          replacements: [
+            uuid(),
+            req.user.sub,
+            'purchase',
+            'purchase.requisition.items.update',
+            'purchase_requisition',
+            req.params.id,
+            JSON.stringify({ item_count: items.length }),
+          ],
+          transaction: tx,
+        },
       );
       await tx.commit();
       return ok(

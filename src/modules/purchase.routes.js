@@ -5,6 +5,7 @@ const permission = require('../middleware/permission');
 const listQuery = require('../utils/listQuery');
 
 const router = express.Router();
+router.use(require('../middleware/moduleGuard')('purchase'));
 
 async function decideRequisition(req, next, allowed) {
   return req.orgDb.transaction(async (transaction) => {
@@ -17,16 +18,30 @@ async function decideRequisition(req, next, allowed) {
     await req.orgDb.query(
       'UPDATE purchase_requisitions SET status=?,rejection_reason=? WHERE id=?',
       {
-        replacements: [next, next === 'rejected' ? req.body?.reason || null : null, req.params.id],
+        replacements: [
+          next,
+          next === 'rejected' ? req.body?.reason || null : null,
+          req.params.id,
+        ],
         transaction,
       },
     );
     await req.orgDb.query(
       'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
       {
-        replacements: [uuid(), req.user.sub, 'purchase', `purchase.requisition.${next}`,
-          'purchase_requisition', req.params.id,
-          JSON.stringify({ from: pr.status, to: next, reason: next === 'rejected' ? req.body?.reason || null : null })],
+        replacements: [
+          uuid(),
+          req.user.sub,
+          'purchase',
+          `purchase.requisition.${next}`,
+          'purchase_requisition',
+          req.params.id,
+          JSON.stringify({
+            from: pr.status,
+            to: next,
+            reason: next === 'rejected' ? req.body?.reason || null : null,
+          }),
+        ],
         transaction,
       },
     );
@@ -257,7 +272,10 @@ router.put(
       'notes',
     ];
     const keys = Object.keys(req.body).filter((k) => allowed.includes(k));
-    if (req.body.priority && !['low', 'normal', 'high', 'urgent'].includes(req.body.priority)) {
+    if (
+      req.body.priority &&
+      !['low', 'normal', 'high', 'urgent'].includes(req.body.priority)
+    ) {
       return fail(res, 400, 'VALIDATION_ERROR', 'Invalid priority');
     }
     const result = await req.orgDb.transaction(async (transaction) => {
@@ -271,21 +289,44 @@ router.put(
       await req.orgDb.query(
         `UPDATE purchase_requisitions SET ${keys.map((k) => `${k}=?`).join(',')} WHERE id=?`,
         {
-          replacements: [...keys.map((k) =>
-            ['required_date', 'warehouse_id'].includes(k) && req.body[k] === '' ? null : req.body[k]
-          ), req.params.id],
+          replacements: [
+            ...keys.map((k) =>
+              ['required_date', 'warehouse_id'].includes(k) &&
+              req.body[k] === ''
+                ? null
+                : req.body[k],
+            ),
+            req.params.id,
+          ],
           transaction,
         },
       );
       await req.orgDb.query(
         'INSERT INTO audit_events(id,user_id,module,event_type,entity_type,entity_id,payload) VALUES(?,?,?,?,?,?,?)',
-        { replacements: [uuid(), req.user.sub, 'purchase', 'purchase.requisition.update',
-          'purchase_requisition', req.params.id, JSON.stringify({ fields: keys })], transaction },
+        {
+          replacements: [
+            uuid(),
+            req.user.sub,
+            'purchase',
+            'purchase.requisition.update',
+            'purchase_requisition',
+            req.params.id,
+            JSON.stringify({ fields: keys }),
+          ],
+          transaction,
+        },
       );
       return { id: req.params.id };
     });
-    if (result.error) return fail(res, result.error === 'NOT_FOUND' ? 404 : 409,
-      result.error, result.error === 'NOT_FOUND' ? 'Requisition not found' : 'Only draft requisitions can be edited');
+    if (result.error)
+      return fail(
+        res,
+        result.error === 'NOT_FOUND' ? 404 : 409,
+        result.error,
+        result.error === 'NOT_FOUND'
+          ? 'Requisition not found'
+          : 'Only draft requisitions can be edited',
+      );
     return ok(res, result, 'Requisition updated');
   }),
 );
@@ -295,8 +336,15 @@ router.post(
   permission('purchase', 'can_approve'),
   asyncHandler(async (req, res) => {
     const result = await decideRequisition(req, 'approved', ['submitted']);
-    if (result.error) return fail(res, result.error === 'NOT_FOUND' ? 404 : 409,
-      result.error, result.error === 'NOT_FOUND' ? 'Requisition not found' : 'Only submitted requisitions can be approved');
+    if (result.error)
+      return fail(
+        res,
+        result.error === 'NOT_FOUND' ? 404 : 409,
+        result.error,
+        result.error === 'NOT_FOUND'
+          ? 'Requisition not found'
+          : 'Only submitted requisitions can be approved',
+      );
     return ok(res, result, 'Requisition approved');
   }),
 );
@@ -305,9 +353,19 @@ router.post(
   '/requisitions/:id/reject',
   permission('purchase', 'can_approve'),
   asyncHandler(async (req, res) => {
-    const result = await decideRequisition(req, 'rejected', ['submitted', 'approved']);
-    if (result.error) return fail(res, result.error === 'NOT_FOUND' ? 404 : 409,
-      result.error, result.error === 'NOT_FOUND' ? 'Requisition not found' : 'Only submitted or approved requisitions can be rejected');
+    const result = await decideRequisition(req, 'rejected', [
+      'submitted',
+      'approved',
+    ]);
+    if (result.error)
+      return fail(
+        res,
+        result.error === 'NOT_FOUND' ? 404 : 409,
+        result.error,
+        result.error === 'NOT_FOUND'
+          ? 'Requisition not found'
+          : 'Only submitted or approved requisitions can be rejected',
+      );
     return ok(res, result, 'Requisition rejected');
   }),
 );
@@ -318,11 +376,18 @@ router.get(
   '/orders',
   permission('purchase', 'can_view'),
   asyncHandler(async (req, res) => {
-    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
-      ['created_at', 'po_number', 'status', 'total_amount'], 'created_at');
+    const { page, limit, offset, search, sort, direction } = listQuery(
+      req.query,
+      ['created_at', 'po_number', 'status', 'total_amount'],
+      'created_at',
+    );
     const status = typeof req.query.status === 'string' ? req.query.status : '';
-    const sortColumn = { created_at: 'po.created_at', po_number: 'po.po_number',
-      status: 'po.status', total_amount: 'po.total_amount' }[sort];
+    const sortColumn = {
+      created_at: 'po.created_at',
+      po_number: 'po.po_number',
+      status: 'po.status',
+      total_amount: 'po.total_amount',
+    }[sort];
 
     let where = 'WHERE 1=1';
     const replacements = [];
@@ -556,11 +621,18 @@ router.get(
   '/receipts',
   permission('purchase', 'can_view'),
   asyncHandler(async (req, res) => {
-    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
-      ['created_at', 'grn_number', 'status', 'received_date'], 'created_at');
+    const { page, limit, offset, search, sort, direction } = listQuery(
+      req.query,
+      ['created_at', 'grn_number', 'status', 'received_date'],
+      'created_at',
+    );
     const status = typeof req.query.status === 'string' ? req.query.status : '';
-    const sortColumn = { created_at: 'g.created_at', grn_number: 'g.grn_number',
-      status: 'g.status', received_date: 'g.received_date' }[sort];
+    const sortColumn = {
+      created_at: 'g.created_at',
+      grn_number: 'g.grn_number',
+      status: 'g.status',
+      received_date: 'g.received_date',
+    }[sort];
 
     let where = 'WHERE 1=1';
     const replacements = [];
@@ -824,11 +896,17 @@ router.get(
   '/returns',
   permission('purchase', 'can_view'),
   asyncHandler(async (req, res) => {
-    const { page, limit, offset, search, sort, direction } = listQuery(req.query,
-      ['created_at', 'return_number', 'status'], 'created_at');
+    const { page, limit, offset, search, sort, direction } = listQuery(
+      req.query,
+      ['created_at', 'return_number', 'status'],
+      'created_at',
+    );
     const status = typeof req.query.status === 'string' ? req.query.status : '';
-    const sortColumn = { created_at: 'pr.created_at', return_number: 'pr.return_number',
-      status: 'pr.status' }[sort];
+    const sortColumn = {
+      created_at: 'pr.created_at',
+      return_number: 'pr.return_number',
+      status: 'pr.status',
+    }[sort];
 
     let where = 'WHERE 1=1';
     const replacements = [];

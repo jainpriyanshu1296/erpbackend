@@ -96,6 +96,17 @@ async function transition(db, table, id, next, userId) {
         `Cannot transition ${table} from ${current} to ${next}`,
         'CONFLICT',
       );
+    if (table === 'work_orders' && next === 'cancelled') {
+      const [[issued]] = await db.query(
+        'SELECT id FROM material_issue_effects WHERE work_order_id=? LIMIT 1',
+        { replacements: [id], transaction: tx },
+      );
+      if (issued)
+        throw invalid(
+          'Issued materials must be reversed before cancelling the work order',
+          'CONFLICT',
+        );
+    }
     await db.query(`UPDATE ${table} SET status=? WHERE id=?`, {
       replacements: [next, id],
       transaction: tx,
@@ -675,17 +686,19 @@ async function releaseProductionOrder(db, id, userId) {
       'SELECT bc.item_id,bc.quantity,bc.scrap_percent,im.is_active FROM bom_components bc LEFT JOIN item_master im ON im.id=bc.item_id WHERE bc.bom_id=?',
       [order.bom_id],
     );
-    const validQuantity = (value) => Number.isFinite(Number(value)) && Number(value) > 0;
+    const validQuantity = (value) =>
+      Number.isFinite(Number(value)) && Number(value) > 0;
     if (
       !bom ||
       !validQuantity(order.planned_qty) ||
       !validQuantity(bom.output_qty) ||
       !components.length ||
-      components.some((component) =>
-        !component.is_active ||
-        !validQuantity(component.quantity) ||
-        !Number.isFinite(Number(component.scrap_percent || 0)) ||
-        Number(component.scrap_percent || 0) < 0
+      components.some(
+        (component) =>
+          !component.is_active ||
+          !validQuantity(component.quantity) ||
+          !Number.isFinite(Number(component.scrap_percent || 0)) ||
+          Number(component.scrap_percent || 0) < 0,
       )
     )
       throw invalid(
