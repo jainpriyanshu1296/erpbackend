@@ -374,6 +374,23 @@ test(
             { item_id: 'flow-rm', quantity: 2, scrap_percent: 0, rate: 5 },
           ],
         });
+        for (const [endpoint, body] of [
+          [
+            '/production/orders',
+            { bom_id: bom.id, item_id: 'flow-fg', planned_qty: 1 },
+          ],
+          [
+            '/production/work-orders',
+            { bom_id: bom.id, finished_item_id: 'flow-fg', planned_qty: 1 },
+          ],
+        ]) {
+          const draft = await call('POST', endpoint, body, 201);
+          await call('GET', `${endpoint}/${draft.id}`);
+          await call('PUT', `${endpoint}/${draft.id}`, { planned_qty: 2 });
+          await call('PATCH', `${endpoint}/${draft.id}`, { planned_qty: 1 });
+          await call('DELETE', `${endpoint}/${draft.id}`);
+          await call('GET', `${endpoint}/${draft.id}`, undefined, 404);
+        }
         const order = await call(
           'POST',
           '/production/orders',
@@ -401,6 +418,49 @@ test(
           'DELETE',
           `/production/work-orders/${wo}/operations/${operation.id}`,
         );
+        for (const [endpoint, body, patch] of [
+          [
+            '/production/job-cards',
+            { production_order_id: order.id, planned_qty: 1 },
+            { planned_qty: 2 },
+          ],
+          [
+            '/production/output',
+            {
+              production_order_id: order.id,
+              item_id: 'flow-fg',
+              warehouse_id: 'flow-wh',
+              quantity: 1,
+            },
+            { quantity: 2 },
+          ],
+          [
+            '/production/scrap',
+            {
+              production_order_id: order.id,
+              item_id: 'flow-rm',
+              warehouse_id: 'flow-wh',
+              quantity: 1,
+              reason: 'Draft test',
+            },
+            { quantity: 2 },
+          ],
+          [
+            '/production/downtime',
+            { production_order_id: order.id, minutes: 1, reason: 'Draft test' },
+            { minutes: 2 },
+          ],
+        ]) {
+          const draft = await call('POST', endpoint, body, 201);
+          await call('GET', `${endpoint}/${draft.id}`);
+          await call('PUT', `${endpoint}/${draft.id}`, patch);
+          await call('PATCH', `${endpoint}/${draft.id}`, patch);
+          await call('DELETE', `${endpoint}/${draft.id}`);
+          await call('GET', `${endpoint}/${draft.id}`, undefined, 404);
+        }
+        await call('PUT', `/production/work-orders/${wo}/status`, {
+          status: 'in_progress',
+        });
         await call('POST', `/production/work-orders/${wo}/material-issue`, {
           warehouse_id: 'flow-wh',
         });
@@ -496,12 +556,14 @@ test(
           { count_number: 'CRUD-C', warehouse_id: 'wh' },
           201,
         );
-        const line = await call(
+        await call(
           'POST',
           `/inventory/counts/${count.id}/items`,
           { item_id: 'rm', counted_qty: 100 },
           201,
         );
+        const countDetail = await call('GET', `/inventory/counts/${count.id}`);
+        const line = countDetail.items[0];
         await call('PATCH', `/inventory/counts/${count.id}/items/${line.id}`, {
           counted_qty: 99,
         });
@@ -541,6 +603,9 @@ test(
           call('POST', '/jobwork/orders', body, 201),
         ]);
         assert.equal(first.id, second.id);
+        await call('PUT', `/jobwork/orders/${first.id}`, {
+          notes: 'Updated order',
+        });
         await call('POST', `/jobwork/orders/${first.id}/submit`, {});
         const outward = {
           job_work_order_id: first.id,
@@ -584,10 +649,21 @@ test(
           { challan_id: a.id, item_id: 'rm', quantity: 6 },
           201,
         );
-        await call('POST', `/jobwork/challans/${a.id}/cancel`, {}, 409);
-        await call('POST', `/jobwork/receipts/${receipt.id}/cancel`, {});
-        await call('POST', `/jobwork/consumption/${consumed.id}/cancel`, {});
-        await call('POST', `/jobwork/challans/${a.id}/cancel`, {});
+        await call('PATCH', `/jobwork/challans/${a.id}`, {
+          notes: 'Updated challan',
+        });
+        await call('GET', `/jobwork/receipts/${receipt.id}`);
+        await call('PUT', `/jobwork/receipts/${receipt.id}`, {
+          notes: 'Updated receipt',
+        });
+        await call('PATCH', `/jobwork/consumption/${consumed.id}`, {
+          notes: 'Updated consumption',
+        });
+        await call('DELETE', `/jobwork/challans/${a.id}`, undefined, 409);
+        await call('DELETE', `/jobwork/receipts/${receipt.id}`);
+        await call('DELETE', `/jobwork/consumption/${consumed.id}`);
+        await call('DELETE', `/jobwork/challans/${a.id}`);
+        await call('DELETE', `/jobwork/orders/${first.id}`);
         const [[restored]] = await db.query(
           "SELECT current_qty,total_value FROM stock_summary WHERE item_id='rm' AND warehouse_id='wh'",
         );
