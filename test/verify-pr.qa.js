@@ -138,7 +138,8 @@ async function main() {
     lists[name] = result.data?.some((row) => row.id === pr.id) || false;
     if (!lists[name]) throw new Error(`PR missing in ${name} list`);
   }
-  const detail = (await call('GET', `/purchase/requisitions/${pr.id}`)).result.data;
+  const detail = (await call('GET', `/purchase/requisitions/${pr.id}`)).result
+    .data;
   if (detail.id !== pr.id || detail.items?.length !== 1) {
     throw new Error('PR detail mismatch');
   }
@@ -176,7 +177,9 @@ async function main() {
 
 main()
   .catch((cause) => {
-    console.error(`FAILED ${step} ${cause.code || cause.message || cause.name}`);
+    console.error(
+      `FAILED ${step} ${cause.code || cause.message || cause.name}`,
+    );
     process.exitCode = 1;
   })
   .finally(async () => {

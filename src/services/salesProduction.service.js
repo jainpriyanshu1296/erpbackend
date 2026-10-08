@@ -559,21 +559,33 @@ async function completeWorkOrder(
     if (!issued.length)
       throw invalid('Issue materials before completing production');
     const [finished] = await db.query(
-      'SELECT current_qty,avg_rate FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE',
+      'SELECT current_qty,avg_rate,total_value FROM stock_summary WHERE item_id=? AND warehouse_id=? FOR UPDATE',
       { replacements: [order.finished_item_id, warehouseId], transaction: tx },
     );
     const currentFinished = Number(finished[0]?.current_qty || 0);
+    const [[issuedCost]] = await db.query(
+      "SELECT COALESCE(SUM(amount),0) material_cost FROM stock_ledger WHERE reference_type='work_order' AND reference_id=? AND transaction_type='material_issue'",
+      { replacements: [workOrderId], transaction: tx },
+    );
+    const materialCost = Number(issuedCost.material_cost);
+    if (!Number.isFinite(materialCost) || materialCost < 0)
+      throw invalid('Material issue cost must be a non-negative number');
+    const outputRate = materialCost / output;
+    const nextQuantity = currentFinished + output;
+    const nextValue = Number(finished[0]?.total_value || 0) + materialCost;
+    const averageRate = nextValue / nextQuantity;
     await db.query(
-      'INSERT INTO stock_summary(item_id,warehouse_id,current_qty,avg_rate,total_value) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE current_qty=?,total_value=?',
+      'INSERT INTO stock_summary(item_id,warehouse_id,current_qty,avg_rate,total_value) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE current_qty=?,avg_rate=?,total_value=?',
       {
         replacements: [
           order.finished_item_id,
           warehouseId,
-          currentFinished + output,
-          finished[0]?.avg_rate || 0,
-          (currentFinished + output) * Number(finished[0]?.avg_rate || 0),
-          currentFinished + output,
-          (currentFinished + output) * Number(finished[0]?.avg_rate || 0),
+          nextQuantity,
+          averageRate,
+          nextValue,
+          nextQuantity,
+          averageRate,
+          nextValue,
         ],
         transaction: tx,
       },
@@ -590,8 +602,8 @@ async function completeWorkOrder(
           workOrderId,
           output,
           currentFinished + output,
-          finished[0]?.avg_rate || 0,
-          output * Number(finished[0]?.avg_rate || 0),
+          outputRate,
+          materialCost,
           userId || null,
         ],
         transaction: tx,

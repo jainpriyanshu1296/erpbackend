@@ -982,14 +982,16 @@ for (const [resource, definition] of Object.entries(jobWorkMasterDefinitions)) {
       const sort = definition.columns.includes(String(req.query.sort))
         ? String(req.query.sort)
         : 'company_name';
-      const direction = String(req.query.direction).toLowerCase() === 'desc'
-        ? 'DESC'
-        : 'ASC';
+      const direction =
+        String(req.query.direction).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
       const conditions = [];
       const values = [];
       if (search) {
         conditions.push(
-          `(${definition.columns.slice(0, 4).map((column) => `${column} LIKE ?`).join(' OR ')})`,
+          `(${definition.columns
+            .slice(0, 4)
+            .map((column) => `${column} LIKE ?`)
+            .join(' OR ')})`,
         );
         values.push(...definition.columns.slice(0, 4).map(() => `%${search}%`));
       }
@@ -997,7 +999,9 @@ for (const [resource, definition] of Object.entries(jobWorkMasterDefinitions)) {
         conditions.push('is_active=?');
         values.push(active === 'active' ? 1 : 0);
       }
-      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const where = conditions.length
+        ? `WHERE ${conditions.join(' AND ')}`
+        : '';
       const [[count]] = await req.orgDb.query(
         `SELECT COUNT(*) total FROM ${definition.table} ${where}`,
         { replacements: values },
@@ -1034,12 +1038,16 @@ for (const [resource, definition] of Object.entries(jobWorkMasterDefinitions)) {
     `/jobwork/${resource}`,
     ...secure('jobwork', 'can_create'),
     asyncHandler(async (req, res) => {
-      const codeColumn = resource === 'vendors' ? 'vendor_code' : 'customer_code';
+      const codeColumn =
+        resource === 'vendors' ? 'vendor_code' : 'customer_code';
       if (!req.body[codeColumn] || !req.body.company_name) {
-        throw Object.assign(new Error(`${codeColumn} and company_name are required`), {
-          status: 400,
-          code: 'VALIDATION_ERROR',
-        });
+        throw Object.assign(
+          new Error(`${codeColumn} and company_name are required`),
+          {
+            status: 400,
+            code: 'VALIDATION_ERROR',
+          },
+        );
       }
       const id = require('uuid').v4();
       const typeColumns = resource === 'vendors' ? ',vendor_type' : '';
@@ -1057,7 +1065,14 @@ for (const [resource, definition] of Object.entries(jobWorkMasterDefinitions)) {
           ],
         },
       );
-      await service.recordAudit(req, 'jobwork', `jobwork.${resource}.create`, resource, id, req.body);
+      await service.recordAudit(
+        req,
+        'jobwork',
+        `jobwork.${resource}.create`,
+        resource,
+        id,
+        req.body,
+      );
       return created(res, { id, is_active: 1 });
     }),
   );
@@ -1085,9 +1100,21 @@ for (const [resource, definition] of Object.entries(jobWorkMasterDefinitions)) {
       }
       await req.orgDb.query(
         `UPDATE ${definition.table} SET ${keys.map((key) => `${key}=?`).join(',')} WHERE id=?`,
-        { replacements: [...keys.map((key) => req.body[key] || null), req.params.id] },
+        {
+          replacements: [
+            ...keys.map((key) => req.body[key] || null),
+            req.params.id,
+          ],
+        },
       );
-      await service.recordAudit(req, 'jobwork', `jobwork.${resource}.update`, resource, req.params.id, req.body);
+      await service.recordAudit(
+        req,
+        'jobwork',
+        `jobwork.${resource}.update`,
+        resource,
+        req.params.id,
+        req.body,
+      );
       return ok(res, { id: req.params.id });
     }),
   );
@@ -1112,10 +1139,20 @@ for (const [resource, definition] of Object.entries(jobWorkMasterDefinitions)) {
           code: 'NOT_FOUND',
         });
       }
-      await req.orgDb.query(`UPDATE ${definition.table} SET is_active=? WHERE id=?`, {
-        replacements: [isActive, req.params.id],
-      });
-      await service.recordAudit(req, 'jobwork', `jobwork.${resource}.status`, resource, req.params.id, { is_active: isActive });
+      await req.orgDb.query(
+        `UPDATE ${definition.table} SET is_active=? WHERE id=?`,
+        {
+          replacements: [isActive, req.params.id],
+        },
+      );
+      await service.recordAudit(
+        req,
+        'jobwork',
+        `jobwork.${resource}.status`,
+        resource,
+        req.params.id,
+        { is_active: isActive },
+      );
       return ok(res, { id: req.params.id, is_active: isActive });
     }),
   );
@@ -1140,13 +1177,14 @@ router.get(
       created_at: 'o.created_at',
     };
     const sort = sortColumns[String(req.query.sort)] || sortColumns.created_at;
-    const direction = String(req.query.direction).toLowerCase() === 'asc'
-      ? 'ASC'
-      : 'DESC';
+    const direction =
+      String(req.query.direction).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
     const conditions = [];
     const values = [];
     if (search) {
-      conditions.push('(o.jw_number LIKE ? OR o.process_name LIKE ? OR v.company_name LIKE ? OR c.company_name LIKE ?)');
+      conditions.push(
+        '(o.jw_number LIKE ? OR o.process_name LIKE ? OR v.company_name LIKE ? OR c.company_name LIKE ?)',
+      );
       values.push(...Array(4).fill(`%${search}%`));
     }
     if (status) {
@@ -1158,7 +1196,8 @@ router.get(
       values.push(orderType);
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    const joins = 'LEFT JOIN vendors v ON v.id=o.vendor_id LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN item_master i ON i.id=o.item_id';
+    const joins =
+      'LEFT JOIN vendors v ON v.id=o.vendor_id LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN item_master i ON i.id=o.item_id';
     const [[count]] = await req.orgDb.query(
       `SELECT COUNT(*) total FROM job_work_orders o ${joins} ${where}`,
       { replacements: values },
@@ -1220,7 +1259,12 @@ router.get(
        WHERE b.job_work_order_id=? ORDER BY b.created_at`,
       { replacements: [req.params.id] },
     );
-    return ok(res, { ...rows[0], challans, finished_goods: finishedGoods, bills });
+    return ok(res, {
+      ...rows[0],
+      challans,
+      finished_goods: finishedGoods,
+      bills,
+    });
   }),
 );
 router.put(
@@ -1255,7 +1299,8 @@ router.get(
       created_at: 'c.created_at',
     };
     const sort = sortColumns[String(req.query.sort)] || sortColumns.created_at;
-    const direction = String(req.query.direction).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const direction =
+      String(req.query.direction).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
     const conditions = [];
     const values = [];
     if (search) {
@@ -1277,7 +1322,11 @@ router.get(
        ORDER BY ${sort} ${direction} LIMIT ? OFFSET ?`,
       { replacements: [...values, limit, (current - 1) * limit] },
     );
-    return ok(res, rows, undefined, { page: current, limit, total: Number(count.total || 0) });
+    return ok(res, rows, undefined, {
+      page: current,
+      limit,
+      total: Number(count.total || 0),
+    });
   }),
 );
 router.get(
@@ -1290,7 +1339,11 @@ router.get(
        LEFT JOIN warehouses w ON w.id=c.warehouse_id WHERE c.id=? LIMIT 1`,
       { replacements: [req.params.id] },
     );
-    if (!rows[0]) throw Object.assign(new Error('Job work challan not found'), { status: 404, code: 'NOT_FOUND' });
+    if (!rows[0])
+      throw Object.assign(new Error('Job work challan not found'), {
+        status: 404,
+        code: 'NOT_FOUND',
+      });
     const [items] = await req.orgDb.query(
       'SELECT ci.*,i.item_code,i.item_name FROM job_work_challan_items ci LEFT JOIN item_master i ON i.id=ci.item_id WHERE ci.challan_id=?',
       { replacements: [req.params.id] },
@@ -1336,10 +1389,20 @@ router.put(
         code: 'INVALID_STATUS',
       });
     }
-    await req.orgDb.query('UPDATE job_work_challans SET notes=? WHERE id=? AND status<>"cancelled"', {
-      replacements: [req.body.notes || null, req.params.id],
-    });
-    await service.recordAudit(req, 'jobwork', 'jobwork.challan.update', 'job_work_challan', req.params.id, req.body);
+    await req.orgDb.query(
+      'UPDATE job_work_challans SET notes=? WHERE id=? AND status<>"cancelled"',
+      {
+        replacements: [req.body.notes || null, req.params.id],
+      },
+    );
+    await service.recordAudit(
+      req,
+      'jobwork',
+      'jobwork.challan.update',
+      'job_work_challan',
+      req.params.id,
+      req.body,
+    );
     return ok(res, { id: req.params.id, notes: req.body.notes || null });
   }),
 );
@@ -1383,9 +1446,8 @@ router.get(
       created_at: 'r.created_at',
     };
     const sort = sortColumns[String(req.query.sort)] || sortColumns.created_at;
-    const direction = String(req.query.direction).toLowerCase() === 'asc'
-      ? 'ASC'
-      : 'DESC';
+    const direction =
+      String(req.query.direction).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const [[count]] = await req.orgDb.query(
       `SELECT COUNT(*) total FROM job_work_receipts r
@@ -1419,7 +1481,11 @@ router.get(
        WHERE r.id=? LIMIT 1`,
       { replacements: [req.params.id] },
     );
-    if (!rows[0]) throw Object.assign(new Error('Job work receipt not found'), { status: 404, code: 'NOT_FOUND' });
+    if (!rows[0])
+      throw Object.assign(new Error('Job work receipt not found'), {
+        status: 404,
+        code: 'NOT_FOUND',
+      });
     const [items] = await req.orgDb.query(
       'SELECT ri.*,i.item_code,i.item_name FROM job_work_receipt_items ri LEFT JOIN item_master i ON i.id=ri.item_id WHERE ri.receipt_id=?',
       { replacements: [req.params.id] },
@@ -1451,10 +1517,20 @@ router.put(
         code: 'INVALID_STATUS',
       });
     }
-    await req.orgDb.query('UPDATE job_work_receipts SET notes=? WHERE id=? AND status<>"cancelled"', {
-      replacements: [req.body.notes || null, req.params.id],
-    });
-    await service.recordAudit(req, 'jobwork', 'jobwork.receipt.update', 'job_work_receipt', req.params.id, req.body);
+    await req.orgDb.query(
+      'UPDATE job_work_receipts SET notes=? WHERE id=? AND status<>"cancelled"',
+      {
+        replacements: [req.body.notes || null, req.params.id],
+      },
+    );
+    await service.recordAudit(
+      req,
+      'jobwork',
+      'jobwork.receipt.update',
+      'job_work_receipt',
+      req.params.id,
+      req.body,
+    );
     return ok(res, { id: req.params.id, notes: req.body.notes || null });
   }),
 );
@@ -1462,14 +1538,20 @@ router.post(
   '/jobwork/challans/:id/cancel',
   ...secure('jobwork', 'can_approve'),
   asyncHandler(async (req, res) =>
-    ok(res, await service.cancelJobWorkStockDocument(req, 'challan', req.params.id)),
+    ok(
+      res,
+      await service.cancelJobWorkStockDocument(req, 'challan', req.params.id),
+    ),
   ),
 );
 router.post(
   '/jobwork/receipts/:id/cancel',
   ...secure('jobwork', 'can_approve'),
   asyncHandler(async (req, res) =>
-    ok(res, await service.cancelJobWorkStockDocument(req, 'receipt', req.params.id)),
+    ok(
+      res,
+      await service.cancelJobWorkStockDocument(req, 'receipt', req.params.id),
+    ),
   ),
 );
 router.get(
@@ -1479,10 +1561,22 @@ router.get(
     const { page: current, limit } = page(req.query);
     const search = String(req.query.search || '').trim();
     const orderStatus = String(req.query.status || '').trim();
-    const sortColumns = ['challan_number', 'item_id', 'outward_quantity', 'received_quantity', 'consumed_quantity', 'pending_quantity'];
-    const sort = sortColumns.includes(String(req.query.sort)) ? String(req.query.sort) : 'challan_number';
-    const direction = String(req.query.direction).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-    const searchWhere = search ? ' AND (c.challan_number LIKE ? OR ci.item_id LIKE ?)' : '';
+    const sortColumns = [
+      'challan_number',
+      'item_id',
+      'outward_quantity',
+      'received_quantity',
+      'consumed_quantity',
+      'pending_quantity',
+    ];
+    const sort = sortColumns.includes(String(req.query.sort))
+      ? String(req.query.sort)
+      : 'challan_number';
+    const direction =
+      String(req.query.direction).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+    const searchWhere = search
+      ? ' AND (c.challan_number LIKE ? OR ci.item_id LIKE ?)'
+      : '';
     const statusWhere = orderStatus ? ' AND o.status=?' : '';
     const filterValues = [
       ...(search ? [`%${search}%`, `%${search}%`] : []),
@@ -1609,14 +1703,24 @@ router.post(
   '/jobwork/finished-goods/:id/cancel',
   ...secure('jobwork', 'can_approve'),
   asyncHandler(async (req, res) =>
-    ok(res, await service.cancelJobWorkStockDocument(req, 'finished', req.params.id)),
+    ok(
+      res,
+      await service.cancelJobWorkStockDocument(req, 'finished', req.params.id),
+    ),
   ),
 );
 const jobWorkLists = {
   consumption: {
     table: 'job_work_consumptions',
     search: ['challan_id', 'item_id', 'notes'],
-    sort: ['challan_id', 'item_id', 'quantity', 'consumed_on', 'status', 'created_at'],
+    sort: [
+      'challan_id',
+      'item_id',
+      'quantity',
+      'consumed_on',
+      'status',
+      'created_at',
+    ],
     select:
       'job_work_consumptions.*,job_work_challans.challan_number,item_master.item_code,item_master.item_name',
     joins:
@@ -1625,7 +1729,14 @@ const jobWorkLists = {
   'finished-goods': {
     table: 'job_work_finished_goods_receipts',
     search: ['receipt_number', 'challan_id', 'item_id'],
-    sort: ['receipt_number', 'challan_id', 'item_id', 'quantity', 'status', 'created_at'],
+    sort: [
+      'receipt_number',
+      'challan_id',
+      'item_id',
+      'quantity',
+      'status',
+      'created_at',
+    ],
     select:
       'job_work_finished_goods_receipts.*,job_work_challans.challan_number,item_master.item_code,item_master.item_name,warehouses.warehouse_name',
     joins:
@@ -1638,7 +1749,12 @@ const jobWorkLists = {
       'finance_documents.document_number',
       'finance_documents.party_id',
     ],
-    sort: ['job_work_order_id', 'finance_document_id', 'bill_type', 'created_at'],
+    sort: [
+      'job_work_order_id',
+      'finance_document_id',
+      'bill_type',
+      'created_at',
+    ],
     sortExpressions: {
       document_number: 'finance_documents.document_number',
       amount: 'finance_documents.amount',
@@ -1663,16 +1779,13 @@ for (const [resource, definition] of Object.entries(jobWorkLists)) {
         ? `${definition.table}.${requestedSort}`
         : definition.sortExpressions?.[requestedSort] ||
           `${definition.table}.created_at`;
-      const direction = String(req.query.direction).toLowerCase() === 'asc'
-        ? 'ASC'
-        : 'DESC';
+      const direction =
+        String(req.query.direction).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
       const conditions = [];
       const values = [];
       if (search) {
         const searchColumns = [
-          ...definition.search.map(
-            (column) => `${definition.table}.${column}`,
-          ),
+          ...definition.search.map((column) => `${definition.table}.${column}`),
           ...(definition.searchExpressions || []),
         ];
         conditions.push(
@@ -1740,13 +1853,26 @@ router.get(
     const { page: current, limit } = page(req.query);
     const search = String(req.query.search || '').trim();
     const status = String(req.query.status || '').trim();
-    const sortColumns = ['jw_number', 'process_name', 'party_name', 'issued_quantity', 'returned_quantity', 'consumed_quantity', 'pending_quantity'];
-    const sort = sortColumns.includes(String(req.query.sort)) ? String(req.query.sort) : 'jw_number';
-    const direction = String(req.query.direction).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+    const sortColumns = [
+      'jw_number',
+      'process_name',
+      'party_name',
+      'issued_quantity',
+      'returned_quantity',
+      'consumed_quantity',
+      'pending_quantity',
+    ];
+    const sort = sortColumns.includes(String(req.query.sort))
+      ? String(req.query.sort)
+      : 'jw_number';
+    const direction =
+      String(req.query.direction).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
     const filters = [];
     const filterValues = [];
     if (search) {
-      filters.push('(report.jw_number LIKE ? OR report.process_name LIKE ? OR report.party_name LIKE ?)');
+      filters.push(
+        '(report.jw_number LIKE ? OR report.process_name LIKE ? OR report.party_name LIKE ?)',
+      );
       filterValues.push(...Array(3).fill(`%${search}%`));
     }
     if (status) {
@@ -1784,7 +1910,11 @@ router.get(
       `SELECT * FROM (${reportSql}) report ${reportWhere} ORDER BY ${sort} ${direction} LIMIT ? OFFSET ?`,
       { replacements: [...filterValues, limit, (current - 1) * limit] },
     );
-    return ok(res, rows, undefined, { page: current, limit, total: Number(count.total || 0) });
+    return ok(res, rows, undefined, {
+      page: current,
+      limit,
+      total: Number(count.total || 0),
+    });
   }),
 );
 router.get(
@@ -1793,14 +1923,15 @@ router.get(
   asyncHandler(async (req, res) => {
     const { page: current, limit } = page(req.query);
     const search = String(req.query.search || '').trim();
-    const sort = ['setting_key', 'setting_value'].includes(String(req.query.sort))
+    const sort = ['setting_key', 'setting_value'].includes(
+      String(req.query.sort),
+    )
       ? String(req.query.sort)
       : 'setting_key';
-    const direction = String(req.query.direction).toLowerCase() === 'desc'
-      ? 'DESC'
-      : 'ASC';
+    const direction =
+      String(req.query.direction).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
     const searchCondition = search
-      ? " AND (setting_key LIKE ? OR setting_value LIKE ?)"
+      ? ' AND (setting_key LIKE ? OR setting_value LIKE ?)'
       : '';
     const values = search ? [`%${search}%`, `%${search}%`] : [];
     const [[count]] = await req.orgDb.query(
@@ -1824,7 +1955,11 @@ router.put(
   '/jobwork/settings',
   ...secure('jobwork', 'can_edit'),
   asyncHandler(async (req, res) => {
-    const allowed = ['default_warehouse', 'require_inward_qc', 'default_return_days'];
+    const allowed = [
+      'default_warehouse',
+      'require_inward_qc',
+      'default_return_days',
+    ];
     if (!allowed.includes(req.body.setting_key)) {
       throw Object.assign(new Error('Unsupported Job Work setting'), {
         status: 400,
@@ -1839,21 +1974,28 @@ router.put(
     }
     if (
       req.body.setting_key === 'default_return_days' &&
-      (!Number.isSafeInteger(Number(req.body.setting_value)) || Number(req.body.setting_value) < 1)
+      (!Number.isSafeInteger(Number(req.body.setting_value)) ||
+        Number(req.body.setting_value) < 1)
     ) {
-      throw Object.assign(new Error('Default return days must be a positive integer'), {
-        status: 400,
-        code: 'VALIDATION_ERROR',
-      });
+      throw Object.assign(
+        new Error('Default return days must be a positive integer'),
+        {
+          status: 400,
+          code: 'VALIDATION_ERROR',
+        },
+      );
     }
     if (
       req.body.setting_key === 'require_inward_qc' &&
       !['true', 'false', '1', '0'].includes(String(req.body.setting_value))
     ) {
-      throw Object.assign(new Error('require_inward_qc must be true or false'), {
-        status: 400,
-        code: 'VALIDATION_ERROR',
-      });
+      throw Object.assign(
+        new Error('require_inward_qc must be true or false'),
+        {
+          status: 400,
+          code: 'VALIDATION_ERROR',
+        },
+      );
     }
     if (req.body.setting_key === 'default_warehouse') {
       const [[warehouse]] = await req.orgDb.query(
@@ -1872,8 +2014,18 @@ router.put(
       'INSERT INTO company_settings(setting_key,setting_value) VALUES(?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)',
       { replacements: [key, String(req.body.setting_value)] },
     );
-    await service.recordAudit(req, 'jobwork', 'jobwork.settings.update', 'company_setting', key, req.body);
-    return ok(res, { setting_key: key, setting_value: String(req.body.setting_value) });
+    await service.recordAudit(
+      req,
+      'jobwork',
+      'jobwork.settings.update',
+      'company_setting',
+      key,
+      req.body,
+    );
+    return ok(res, {
+      setting_key: key,
+      setting_value: String(req.body.setting_value),
+    });
   }),
 );
 router.post(

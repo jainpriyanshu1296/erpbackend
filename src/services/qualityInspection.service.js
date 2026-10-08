@@ -30,12 +30,26 @@ async function requireInspectionSource(
       "SELECT r.id,r.warehouse_id,SUM(ri.quantity) quantity,SUM(ri.quantity*ri.rate)/NULLIF(SUM(ri.quantity),0) rate FROM job_work_receipts r JOIN job_work_receipt_items ri ON ri.receipt_id=r.id WHERE r.id=? AND ri.item_id=? AND r.status='posted' GROUP BY r.id,r.warehouse_id",
       [sourceId, itemId],
     ];
-  } else if (sourceType === 'job_work_finished_goods_receipt' && type === 'final') {
+  } else if (
+    sourceType === 'job_work_finished_goods_receipt' &&
+    type === 'final'
+  ) {
     queries.final = [
       "SELECT id,quantity,warehouse_id,rate FROM job_work_finished_goods_receipts WHERE id=? AND item_id=? AND status='posted'",
       [sourceId, itemId],
     ];
-  } else if (sourceType && !['grn', 'production', 'finished_goods', 'production_output', 'work_order', 'production_order', 'job_card'].includes(sourceType)) {
+  } else if (
+    sourceType &&
+    ![
+      'grn',
+      'production',
+      'finished_goods',
+      'production_output',
+      'work_order',
+      'production_order',
+      'job_card',
+    ].includes(sourceType)
+  ) {
     throw invalid('Unsupported inspection source');
   }
   if (!queries[type]) {
@@ -139,7 +153,9 @@ async function processResult(db, id, body, userId) {
     // Serialize incoming inspections against the same receipt before checking
     // cumulative inspected quantities and applying accepted-stock effects.
     if (type === 'incoming' && inspection.source_type === 'job_work_receipt') {
-      await query('SELECT id FROM job_work_receipts WHERE id=? FOR UPDATE', [sourceId]);
+      await query('SELECT id FROM job_work_receipts WHERE id=? FOR UPDATE', [
+        sourceId,
+      ]);
     } else if (type === 'incoming') {
       await query('SELECT id FROM grn WHERE id=? FOR UPDATE', [sourceId]);
     }
@@ -152,7 +168,11 @@ async function processResult(db, id, body, userId) {
       throw invalid('Source quantity has already been inspected');
     }
 
-    if (type === 'incoming' && inspection.source_type !== 'job_work_receipt' && qty.accepted > 0) {
+    if (
+      type === 'incoming' &&
+      inspection.source_type !== 'job_work_receipt' &&
+      qty.accepted > 0
+    ) {
       if (!source.warehouse_id) {
         throw invalid('Receipt warehouse is required');
       }
@@ -179,7 +199,9 @@ async function processResult(db, id, body, userId) {
       }
     }
     if (
-      ['job_work_receipt', 'job_work_finished_goods_receipt'].includes(inspection.source_type) &&
+      ['job_work_receipt', 'job_work_finished_goods_receipt'].includes(
+        inspection.source_type,
+      ) &&
       qty.rejected > 0
     ) {
       await require('./zeroGapClosure.service').applyStockEffect(db, {
