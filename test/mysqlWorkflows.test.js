@@ -339,6 +339,27 @@ test(
           rejected_qty: 0,
         });
         await stock('flow-rm', 'flow-wh', 10, 50);
+        const returned = await call(
+          'POST',
+          '/purchase/returns',
+          {
+            vendor_id: 'vendor',
+            grn_id: grn.id,
+            warehouse_id: 'flow-wh',
+            reason: 'Draft return',
+            items: [{ item_id: 'flow-rm', return_qty: 1, rate: 5 }],
+          },
+          201,
+        );
+        await call('GET', `/purchase/returns/${returned.id}`);
+        await call('PUT', `/purchase/returns/${returned.id}`, {
+          notes: 'Updated draft',
+        });
+        await call('PATCH', `/purchase/returns/${returned.id}`, {
+          items: [{ item_id: 'flow-rm', quantity: 2, rate: 5 }],
+        });
+        await call('DELETE', `/purchase/returns/${returned.id}`);
+        await stock('flow-rm', 'flow-wh', 10, 50);
         const transfer = await call(
           'POST',
           '/inventory/transfers',
@@ -586,6 +607,131 @@ test(
       },
     );
     await t.test(
+      'Purchase sourcing and vendor invoice CRUD retain accounting integrity',
+      async () => {
+        await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
+        const rfq = await call(
+          'POST',
+          '/purchase/rfqs',
+          { rfq_number: 'CRUD-RFQ' },
+          201,
+        );
+        await call('PUT', `/purchase/rfqs/${rfq.id}`, {
+          items: [{ item_id: 'rm', quantity: 2 }],
+        });
+        await call('PATCH', `/purchase/rfqs/${rfq.id}`, {
+          items: [{ item_id: 'rm', quantity: 3 }],
+        });
+        const quotation = await call(
+          'POST',
+          '/purchase/supplier-quotations',
+          {
+            quotation_number: 'CRUD-QUOTE',
+            rfq_id: rfq.id,
+            vendor_id: 'vendor',
+          },
+          201,
+        );
+        await call('PUT', `/purchase/supplier-quotations/${quotation.id}`, {
+          items: [{ item_id: 'rm', quantity: 3, rate: 5 }],
+        });
+        await call('PATCH', `/purchase/supplier-quotations/${quotation.id}`, {
+          items: [{ item_id: 'rm', quantity: 3, rate: 6 }],
+        });
+        const quoteDetail = await call(
+          'GET',
+          `/operations/record?endpoint=%2Fpurchase%2Fsupplier-quotations&id=${quotation.id}`,
+        );
+        assert.equal(Number(quoteDetail.total_amount), 18);
+        await call('DELETE', `/purchase/supplier-quotations/${quotation.id}`);
+        const supplier = await call(
+          'POST',
+          '/closure/rfq/suppliers',
+          { rfq_id: rfq.id, supplier_id: 'vendor', status: 'invited' },
+          201,
+        );
+        await call('PUT', `/closure/rfq/suppliers/${supplier.id}`, {
+          supplier_id: 'vendor',
+        });
+        await call('PATCH', `/closure/rfq/suppliers/${supplier.id}`, {
+          supplier_id: 'vendor',
+        });
+        await call('PUT', `/purchase/rfqs/${rfq.id}/status`, {
+          status: 'requested',
+        });
+        const quoteLine = await call(
+          'POST',
+          '/closure/rfq/quotation-lines',
+          {
+            rfq_supplier_id: supplier.id,
+            item_id: 'rm',
+            quantity: 3,
+            unit_price: 5,
+          },
+          201,
+        );
+        await call('PUT', `/closure/rfq/quotation-lines/${quoteLine.id}`, {
+          unit_price: 6,
+        });
+        await call('PATCH', `/closure/rfq/quotation-lines/${quoteLine.id}`, {
+          unit_price: 7,
+        });
+        await call('GET', `/closure/rfq/quotation-lines/${quoteLine.id}`);
+        await call('DELETE', `/closure/rfq/quotation-lines/${quoteLine.id}`);
+        await call('DELETE', `/closure/rfq/suppliers/${supplier.id}`);
+        await call('DELETE', `/purchase/rfqs/${rfq.id}`, undefined, 409);
+        const draft = await call(
+          'POST',
+          '/purchase/rfqs',
+          { rfq_number: 'DELETE-RFQ' },
+          201,
+        );
+        await call('DELETE', `/purchase/rfqs/${draft.id}`);
+        const invoice = await call(
+          'POST',
+          '/purchase/vendor-invoices',
+          {
+            document_number: 'CRUD-INVOICE',
+            document_date: '2026-10-08',
+            party_id: 'vendor',
+            amount: 118,
+            taxable_amount: 100,
+            cgst: 9,
+            sgst: 9,
+          },
+          201,
+        );
+        await call('PUT', `/purchase/vendor-invoices/${invoice.id}`, {
+          document_number: 'CRUD-INVOICE-REVISED',
+        });
+        await call('PATCH', `/purchase/vendor-invoices/${invoice.id}`, {
+          due_date: '2026-12-01',
+        });
+        await call(
+          'PATCH',
+          `/purchase/vendor-invoices/${invoice.id}`,
+          { amount: 200 },
+          409,
+        );
+        await call('DELETE', `/purchase/vendor-invoices/${invoice.id}`);
+        const cancelled = await call(
+          'GET',
+          `/purchase/vendor-invoices/${invoice.id}`,
+        );
+        assert.equal(cancelled.status, 'cancelled');
+        const [[journal]] = await db.query(
+          "SELECT status FROM finance_journals WHERE source_type='vendor_invoice' AND source_id=?",
+          { replacements: [invoice.id] },
+        );
+        assert.equal(journal.status, 'reversed');
+        const [[gst]] = await db.query(
+          "SELECT SUM(CASE WHEN e.direction='debit' THEN e.amount ELSE -e.amount END) balance FROM gst_ledger_entries e JOIN gst_context_snapshots s ON s.id=e.snapshot_id WHERE s.source_id=?",
+          { replacements: [invoice.id] },
+        );
+        assert.equal(Number(gst.balance), 0);
+      },
+    );
+    await t.test(
       'Job Work concurrent retry posts one document and one stock effect',
       async () => {
         await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
@@ -624,6 +770,51 @@ test(
         );
         assert.equal(Number(stock.current_qty), 90);
         assert.equal(Number(stock.total_value), 450);
+        const finished = await call(
+          'POST',
+          '/jobwork/finished-goods',
+          {
+            challan_id: a.id,
+            receipt_number: 'JW-FG-1',
+            item_id: 'fg',
+            warehouse_id: 'wh',
+            quantity: 2,
+            rate: 5,
+            requires_qc: false,
+          },
+          201,
+        );
+        await call('PUT', `/jobwork/finished-goods/${finished.id}`, {
+          receipt_date: '2026-10-08',
+        });
+        await call('PATCH', `/jobwork/finished-goods/${finished.id}`, {
+          receipt_date: '2026-10-09',
+        });
+        await call('GET', `/jobwork/finished-goods/${finished.id}`);
+        await call('DELETE', `/jobwork/finished-goods/${finished.id}`);
+        const bill = await call(
+          'POST',
+          '/jobwork/billing',
+          {
+            job_work_order_id: first.id,
+            document_number: 'JW-BILL-1',
+            document_date: '2026-10-08',
+            amount: 50,
+          },
+          201,
+        );
+        const [[billRow]] = await db.query(
+          'SELECT id FROM job_work_bills WHERE finance_document_id=?',
+          { replacements: [bill.id] },
+        );
+        await call('GET', `/jobwork/billing/${billRow.id}`);
+        await call('PUT', `/jobwork/billing/${billRow.id}`, {
+          document_number: 'JW-BILL-REVISED',
+        });
+        await call('PATCH', `/jobwork/billing/${billRow.id}`, {
+          due_date: '2026-12-01',
+        });
+        await call('DELETE', `/jobwork/billing/${billRow.id}`);
         const receipt = await call(
           'POST',
           '/jobwork/receipts',
