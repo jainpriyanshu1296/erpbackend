@@ -98,6 +98,7 @@ const resources = {
     'vendors',
     ['vendor_code', ...partyFields, 'vendor_type', 'is_active'],
     ['company_name'],
+    { create: true },
   ),
   '/jobwork/vendors': master(
     'jobwork',

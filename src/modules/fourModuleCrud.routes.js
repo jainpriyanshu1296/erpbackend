@@ -64,6 +64,42 @@ router.get(
     ok(res, await service.detail(req, req.query.endpoint, req.query.id)),
   ),
 );
+router.get(
+  '/purchase/vendors',
+  ...secure('purchase', 'can_view'),
+  asyncHandler(async (req, res) => {
+    const { page, limit, offset, search, sort, direction } =
+      require('../utils/listQuery')(
+        req.query,
+        ['company_name', 'vendor_code', 'is_active'],
+        'company_name',
+      );
+    const filters = search
+      ? ['(company_name LIKE ? OR vendor_code LIKE ?)']
+      : [];
+    const values = search ? [`%${search}%`, `%${search}%`] : [];
+    if (req.query.status) {
+      if (!['active', 'inactive'].includes(req.query.status))
+        throw service.fail('Invalid vendor status');
+      filters.push('is_active=?');
+      values.push(req.query.status === 'active' ? 1 : 0);
+    }
+    const where = filters.length ? ` WHERE ${filters.join(' AND ')}` : '';
+    const [[count]] = await req.orgDb.query(
+      `SELECT COUNT(*) total FROM vendors${where}`,
+      { replacements: values },
+    );
+    const [rows] = await req.orgDb.query(
+      `SELECT * FROM vendors${where} ORDER BY ${sort} ${direction},id LIMIT ? OFFSET ?`,
+      { replacements: [...values, limit, offset] },
+    );
+    return ok(res, rows, 'Vendors fetched', {
+      page,
+      limit,
+      total: Number(count.total),
+    });
+  }),
+);
 // GRN navigation and legacy receipts use the same validated receipt workflow.
 for (const path of ['/purchase/grn', '/purchase/grn/:id/post'])
   router.post(
@@ -100,6 +136,7 @@ for (const [endpoint, target] of Object.entries({
       });
     });
 const missingDetail = new Set([
+  '/purchase/vendors',
   '/purchase/returns',
   '/inventory/adjustments',
   '/inventory/batches',
@@ -155,7 +192,7 @@ for (const endpoint of [...Object.keys(resources), ...Object.keys(aliases)]) {
       }),
     );
   // Keep existing validated creators and workflow action routes in control.
-  if (def.create)
+  if (def.create && endpoint !== '/vendors')
     router.post(
       endpoint,
       ...secure(def.module, 'can_create'),

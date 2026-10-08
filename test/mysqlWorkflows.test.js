@@ -571,6 +571,45 @@ test(
           },
           400,
         );
+        const category = await call('POST', '/inventory/categories', {
+          category: 'CRUD group',
+        });
+        await call('GET', `/inventory/categories/${category.id}`);
+        await call('PUT', `/inventory/categories/${category.id}`, {
+          category: 'CRUD group',
+        });
+        await call('PATCH', `/inventory/categories/${category.id}`, {
+          category: 'CRUD group',
+          is_active: 1,
+        });
+        await call('DELETE', `/inventory/categories/${category.id}`);
+        assert.equal(
+          Number(
+            (await call('GET', `/inventory/categories/${category.id}`))
+              .is_active,
+          ),
+          0,
+        );
+        const adjustment = await call(
+          'POST',
+          '/inventory/adjustments',
+          {
+            warehouse_id: 'wh',
+            reason: 'Draft correction',
+            items: [
+              { item_id: 'rm', quantity: 1, rate: 5, direction: 'increase' },
+            ],
+          },
+          201,
+        );
+        await call('PUT', `/inventory/adjustments/${adjustment.id}`, {
+          reason: 'Revised correction',
+        });
+        await call('PATCH', `/inventory/adjustments/${adjustment.id}`, {
+          items: [{ item_id: 'rm', quantity: 2, rate: 5, direction: 'in' }],
+        });
+        await call('GET', `/inventory/adjustments/${adjustment.id}`);
+        await call('DELETE', `/inventory/adjustments/${adjustment.id}`);
         const count = await call(
           'POST',
           '/inventory/counts',
@@ -610,6 +649,33 @@ test(
       'Purchase sourcing and vendor invoice CRUD retain accounting integrity',
       async () => {
         await require('../src/middleware/rateLimiter').resetKey('127.0.0.1');
+        for (const [endpoint, body] of [
+          [
+            '/purchase/vendors',
+            { vendor_code: 'CRUD-PV', company_name: 'CRUD purchase vendor' },
+          ],
+          [
+            '/jobwork/vendors',
+            { vendor_code: 'CRUD-JV', company_name: 'CRUD jobwork vendor' },
+          ],
+          [
+            '/jobwork/customers',
+            { customer_code: 'CRUD-JC', company_name: 'CRUD jobwork customer' },
+          ],
+        ]) {
+          const party = await call('POST', endpoint, body, 201);
+          await call('GET', `${endpoint}/${party.id}`);
+          await call('PUT', `${endpoint}/${party.id}`, {
+            company_name: 'Revised party',
+          });
+          await call('PATCH', `${endpoint}/${party.id}`, {
+            contact_person: 'Contact',
+          });
+          await call('DELETE', `${endpoint}/${party.id}`);
+          const inactive = await call('GET', `${endpoint}/${party.id}`);
+          assert.equal(Number(inactive.is_active), 0);
+          await call('GET', `${endpoint}?status=inactive`);
+        }
         const rfq = await call(
           'POST',
           '/purchase/rfqs',

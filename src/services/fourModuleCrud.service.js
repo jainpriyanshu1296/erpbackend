@@ -1033,7 +1033,9 @@ async function create(req, endpoint, body) {
   const items = def.children ? normalizeItems(def, rawItems) : null;
   return inTransaction(req, async (tx) => {
     const id = uuid();
-    const record = { id, ...data, status: def.initial || 'draft' };
+    const record = def.master
+      ? { id, is_active: 1, ...data }
+      : { id, ...data, status: def.initial || 'draft' };
     await validateContext(req.orgDb, tx, def, record, Object.keys(data));
     if (def.number && !record[def.number[0]])
       record[def.number[0]] = await nextNumber(
